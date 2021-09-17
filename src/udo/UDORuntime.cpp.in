@@ -1,0 +1,18 @@
+#include "udo/UDORuntime.hpp"
+//---------------------------------------------------------------------------
+// UDO runtime
+// (c) 2021 Moritz Sichert
+//---------------------------------------------------------------------------
+using namespace std;
+using namespace std::literals::string_view_literals;
+//---------------------------------------------------------------------------
+namespace udo {
+/// The clang++ binary that is used by default for C++ UDOs
+const string_view cxxUDODefaultClangxx = "@CXXUDO_DEFAULT_CLANGXX@"sv;
+/// The string that contains the header for C++ UDOs that they include as
+/// <udo/UDOperator.hpp>
+const string_view cxxUDOHeader = R"CXXUDOHEADER(
+@CXXUDO_HEADER@
+)CXXUDOHEADER"sv;
+}
+//---------------------------------------------------------------------------
