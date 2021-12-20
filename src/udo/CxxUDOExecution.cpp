@@ -177,6 +177,11 @@ class PrecompiledCxxUDOResolver : public llvm::JITSymbolResolver {
    /// Return which symbols out of the given ones should be looked up elsewhere
    /// by the caller
    llvm::Expected<LookupSet> getResponsibilitySet(const LookupSet& symbols) override;
+
+   /// Specify if this resolver can return valid symbols with zero value. This
+   /// is true for the PrecompiledCxxUDOResolver as it may return nullptr for
+   /// undefined weak symbols.
+   bool allowsZeroSymbols() override { return true; }
 };
 //---------------------------------------------------------------------------
 PrecompiledCxxUDOResolver::PrecompiledCxxUDOResolver(llvm::RuntimeDyld& linker, CxxUDOFunctors* functorStorage, CxxUDOAllocationFuncs allocationFuncs)

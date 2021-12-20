@@ -182,6 +182,7 @@ LLVMCompiler::LLVMCompiler(unordered_map<string, void*> functionSymbols, unique_
    : functionSymbols(move(functionSymbols)), context(move(context)),
      targetMachine(move(targetMachine)),
      optimizationPasses(move(optimizationPasses)),
+     es(make_unique<llvm::orc::UnsupportedExecutorProcessControl>()),
      objectLayer(es, []() { return make_unique<llvm::SectionMemoryManager>(); }),
      compileLayer(es, objectLayer, make_unique<llvm::orc::SimpleCompiler>(*this->targetMachine)),
      optimizeLayer(es, compileLayer, [optimizationPasses = span(this->optimizationPasses), cancellation](llvm::orc::ThreadSafeModule m, const llvm::orc::MaterializationResponsibility&) { optimizeModule(m.getModuleUnlocked(),optimizationPasses,cancellation,false); return m; }),

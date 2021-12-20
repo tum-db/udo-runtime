@@ -229,9 +229,9 @@ tl::expected<CxxUDOLLVMFunctions, string> CxxUDOCompiler::preprocessModule()
          auto* nullptrValue = llvm::ConstantPointerNull::get(voidPtr);
 
          auto* argcPtr = builder.CreateConstInBoundsGEP2_32(constructorArgType, constructorArg, 0, 0);
-         auto* argc = builder.CreateLoad(argcPtr);
+         auto* argc = builder.CreateLoad(i32Type, argcPtr);
          auto* argvPtr = builder.CreateConstInBoundsGEP2_32(constructorArgType, constructorArg, 0, 1);
-         auto* argv = builder.CreateLoad(argvPtr);
+         auto* argv = builder.CreateLoad(voidPtr, argvPtr);
 
          builder.CreateCall(libcStartMain, {nullptrValue, argc, argv, nullptrValue, nullptrValue, nullptrValue, nullptrValue});
       }
@@ -287,7 +287,7 @@ tl::expected<CxxUDOLLVMFunctions, string> CxxUDOCompiler::preprocessModule()
       // Generate the code to call the functor
       builder.SetInsertPoint(bb);
       auto* functorFuncPtr = builder.CreateConstGEP2_32(functions.udoFunctorType, callbackPtrVar, 0, 0);
-      auto* functorFuncVoidPtr = builder.CreateLoad(functorFuncPtr, "functorPtr");
+      auto* functorFuncVoidPtr = builder.CreateLoad(voidPtr, functorFuncPtr, "functorPtr");
       auto* functorFuncType = llvm::FunctionType::get(llvm::Type::getVoidTy(context), {functions.udoFunctorType->getPointerTo(), voidPtr, voidPtr, voidPtr}, false);
       auto* functorFunc = builder.CreateBitCast(functorFuncVoidPtr, functorFuncType->getPointerTo());
       auto* tupleArg = builder.CreateBitCast(&*analysis.produceOutputTuple->arg_begin(), voidPtr);
@@ -354,7 +354,7 @@ tl::expected<CxxUDOLLVMFunctions, string> CxxUDOCompiler::preprocessModule()
       auto* bb = llvm::BasicBlock::Create(context, "init", printDebugFunc);
       llvm::IRBuilder<> builder(bb);
       auto* functorFuncPtr = builder.CreateConstGEP2_32(functions.udoFunctorType, functorVar, 0, 0);
-      auto* functorFuncVoidPtr = builder.CreateLoad(functorFuncPtr, "functorPtr");
+      auto* functorFuncVoidPtr = builder.CreateLoad(voidPtr, functorFuncPtr, "functorPtr");
       auto* functorFuncType = llvm::FunctionType::get(llvm::Type::getVoidTy(context), {functions.udoFunctorType->getPointerTo(), voidPtr, llvm::Type::getInt64Ty(context)}, false);
       auto* functorFunc = builder.CreateBitCast(functorFuncVoidPtr, functorFuncType->getPointerTo());
       auto argsIt = printDebugFunc->arg_begin();
@@ -387,7 +387,7 @@ tl::expected<CxxUDOLLVMFunctions, string> CxxUDOCompiler::preprocessModule()
       auto* bb = llvm::BasicBlock::Create(context, "init", getRandomFunc);
       llvm::IRBuilder<> builder(bb);
       auto* functorFuncPtr = builder.CreateConstGEP2_32(functions.udoFunctorType, functorVar, 0, 0);
-      auto* functorFuncVoidPtr = builder.CreateLoad(functorFuncPtr, "functorPtr");
+      auto* functorFuncVoidPtr = builder.CreateLoad(voidPtr, functorFuncPtr, "functorPtr");
       auto* functorFuncType = llvm::FunctionType::get(llvm::Type::getInt64Ty(context), {functions.udoFunctorType->getPointerTo()}, false);
       auto* functorFunc = builder.CreateBitCast(functorFuncVoidPtr, functorFuncType->getPointerTo());
       auto* retValue = builder.CreateCall(functorFuncType, functorFunc, {functorVar});

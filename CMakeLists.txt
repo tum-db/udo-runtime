@@ -10,22 +10,9 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wold-style-cast -Woverloa
 set(LLVM_ROOT "" CACHE PATH "Specify path to build directory of a custom LLVM. Check that LLVM_DIR matches!")
 find_package(LLVM REQUIRED CONFIG)
 add_library(udoLLVM INTERFACE)
-target_include_directories(udoLLVM SYSTEM INTERFACE ${CMAKE_CURRENT_BINARY_DIR}/thirdparty/llvm ${LLVM_INCLUDE_DIRS})
+target_include_directories(udoLLVM SYSTEM INTERFACE ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(udoLLVM INTERFACE ${LLVM_DEFINITIONS})
 target_link_libraries(udoLLVM INTERFACE LLVM)
-#---------------------------------------------------------------------------
-# LLVM vendoring
-find_file(LLVM_STLEXTRAS "llvm/ADT/STLExtras.h" PATHS ${LLVM_INCLUDE_DIRS} REQUIRED NO_DEFAULT_PATH)
-file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/thirdparty/llvm/llvm/ADT)
-add_custom_command(
-   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/thirdparty/llvm/patched
-   COMMAND cp ${LLVM_STLEXTRAS} ${CMAKE_CURRENT_BINARY_DIR}/thirdparty/llvm/llvm/ADT/STLExtras.h &&
-      patch -s --no-backup-if-mismatch -p3 < ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/llvm/95d0d8e9e9d10da3cfa503fbba405e740aea3cc1.patch && touch patched
-   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/thirdparty/llvm
-   DEPENDS thirdparty/llvm/95d0d8e9e9d10da3cfa503fbba405e740aea3cc1.patch
-)
-add_custom_target(udoLLVMVendor DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/thirdparty/llvm/patched)
-add_dependencies(udoLLVM udoLLVMVendor)
 #---------------------------------------------------------------------------
 # Configure Clang dependency
 find_package(Clang REQUIRED CONFIG HINTS ${LLVM_DIR} ${LLVM_INSTALL_PREFIX} "${LLVM_DIR}/.." NO_DEFAULT_PATH)
