@@ -70,9 +70,9 @@ class ClangCompiler {
 
       public:
       /// Move constructor
-      CompilationWrapper(CompilationWrapper&& c);
+      CompilationWrapper(CompilationWrapper&& c) noexcept;
       /// Move assignment
-      CompilationWrapper& operator=(CompilationWrapper&& c);
+      CompilationWrapper& operator=(CompilationWrapper&& c) noexcept;
       /// Destructor
       ~CompilationWrapper();
 

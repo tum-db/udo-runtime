@@ -7,6 +7,7 @@
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalVariable.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/Casting.h>
@@ -22,6 +23,11 @@ namespace udo::llvm_metadata {
 //---------------------------------------------------------------------------
 static const char tc[] = "udo/LLVMMetadata";
 //---------------------------------------------------------------------------
+template <typename T>
+static IOResult error(T value) {
+   return tl::unexpected(string(move(value)));
+}
+//---------------------------------------------------------------------------
 llvm::LLVMContext& MetadataReader::getContext()
 // Get the llvm context
 {
@@ -33,13 +39,13 @@ IOResult MetadataReader::readNamedNode(string_view name)
 {
    auto* nmd = module.getNamedMetadata(llvm::StringRef(name.data(), name.size()));
    if (!nmd)
-      return tl::unexpected(tr(tc, "did not find named metadata"));
+      return error(tr(tc, "did not find named metadata"));
    if (nmd->getNumOperands() != 1)
-      return tl::unexpected(tr(tc, "unexpected number of operands in named metadata"));
+      return error(tr(tc, "unexpected number of operands in named metadata"));
 
    auto* operand = nmd->getOperand(0);
    if (operand->getNumOperands() != 1)
-      return tl::unexpected(tr(tc, "unexpected number of operands in named metadata"));
+      return error(tr(tc, "unexpected number of operands in named metadata"));
    current = operand->getOperand(0);
 
    return {};
@@ -50,7 +56,7 @@ IOResult MetadataReader::readNodes(vector<llvm::Metadata*>& nodes)
 {
    auto* mdTuple = llvm::dyn_cast<llvm::MDTuple>(current);
    if (!mdTuple)
-      return tl::unexpected(tr(tc, "unexpected metadata type"));
+      return error(tr(tc, "unexpected metadata type"));
 
    for (auto& op : mdTuple->operands())
       nodes.push_back(op);
@@ -62,10 +68,10 @@ IOResult MetadataReader::readNodes(vector<llvm::Metadata*>& nodes, size_t size)
 {
    auto* mdTuple = llvm::dyn_cast<llvm::MDTuple>(current);
    if (!mdTuple)
-      return tl::unexpected(tr(tc, "unexpected metadata type"));
+      return error(tr(tc, "unexpected metadata type"));
 
    if (mdTuple->getNumOperands() != size)
-      return tl::unexpected(tr(tc, "mismatching number of operands"));
+      return error(tr(tc, "mismatching number of operands"));
 
    for (auto& op : mdTuple->operands())
       nodes.push_back(op);
@@ -99,14 +105,14 @@ static IOResult readIntMd(MetadataReader& reader, llvm::ConstantInt*& intMdOut, 
 {
    auto* constMd = llvm::dyn_cast<llvm::ConstantAsMetadata>(reader.current);
    if (!constMd)
-      return tl::unexpected(tr(tc, "unexpected metadata type"));
+      return error(tr(tc, "unexpected metadata type"));
 
    auto* intMd = llvm::dyn_cast<llvm::ConstantInt>(constMd->getValue());
    if (!intMd)
-      return tl::unexpected(tr(tc, "unexpected metadata value type"));
+      return error(tr(tc, "unexpected metadata value type"));
 
    if (intMd->getBitWidth() != bitSize)
-      return tl::unexpected(tr(tc, "unexpected size of int"));
+      return error(tr(tc, "unexpected size of int"));
 
    intMdOut = intMd;
    return {};
@@ -145,7 +151,7 @@ IOResult IO<uintmax_t>::output(MetadataWriter& writer, uintmax_t value, size_t b
 IOResult IO<string_view>::input(MetadataReader& reader, string_view& value) {
    auto* strMd = llvm::dyn_cast<llvm::MDString>(reader.current);
    if (!strMd)
-      return tl::unexpected(tr(tc, "unexpected metadata type"));
+      return error(tr(tc, "unexpected metadata type"));
 
    auto ref = strMd->getString();
    value = string_view{ref.data(), ref.size()};
@@ -173,7 +179,7 @@ IOResult IO<string>::output(MetadataWriter& writer, const string& value) {
 IOResult IO<llvm::GlobalVariable*>::input(MetadataReader& reader, llvm::GlobalVariable*& value) {
    auto* constMd = llvm::dyn_cast<llvm::ConstantAsMetadata>(reader.current);
    if (!constMd)
-      return tl::unexpected(tr(tc, "unexpected metadata type"));
+      return error(tr(tc, "unexpected metadata type"));
 
    auto* mdValue = constMd->getValue();
 
@@ -182,7 +188,7 @@ IOResult IO<llvm::GlobalVariable*>::input(MetadataReader& reader, llvm::GlobalVa
    } else {
       auto* globalVar = llvm::dyn_cast<llvm::GlobalVariable>(mdValue);
       if (!globalVar)
-         return tl::unexpected(tr(tc, "unexpected metadata value type"));
+         return error(tr(tc, "unexpected metadata value type"));
 
       value = globalVar;
    }
@@ -201,7 +207,7 @@ IOResult IO<llvm::GlobalVariable*>::output(MetadataWriter& writer, llvm::GlobalV
 IOResult IO<llvm::Function*>::input(MetadataReader& reader, llvm::Function*& value) {
    auto* constMd = llvm::dyn_cast<llvm::ConstantAsMetadata>(reader.current);
    if (!constMd)
-      return tl::unexpected(tr(tc, "unexpected metadata type"));
+      return error(tr(tc, "unexpected metadata type"));
 
    auto* mdValue = constMd->getValue();
 
@@ -210,7 +216,7 @@ IOResult IO<llvm::Function*>::input(MetadataReader& reader, llvm::Function*& val
    } else {
       auto* func = llvm::dyn_cast<llvm::Function>(constMd->getValue());
       if (!func)
-         return tl::unexpected(tr(tc, "unexpected metadata value type"));
+         return error(tr(tc, "unexpected metadata value type"));
 
       value = func;
    }
@@ -233,7 +239,7 @@ IOResult IO<llvm::BasicBlock*>::input(MetadataReader& reader, llvm::BasicBlock*&
    auto [func, index] = bbMetadata;
 
    unsigned i = 0;
-   for (auto& block : func->getBasicBlockList()) {
+   for (auto& block : *func) {
       if (i == index) {
          value = &block;
          return {};
@@ -241,18 +247,18 @@ IOResult IO<llvm::BasicBlock*>::input(MetadataReader& reader, llvm::BasicBlock*&
       ++i;
    }
 
-   return tl::unexpected(tr(tc, "block index out of range"));
+   return error(tr(tc, "block index out of range"));
 }
 //---------------------------------------------------------------------------
 IOResult IO<llvm::BasicBlock*>::output(MetadataWriter& writer, llvm::BasicBlock* value) {
    llvm::Function* func = value->getParent();
    size_t index = 0;
-   for (auto& block : func->getBasicBlockList()) {
+   for (auto& block : *func) {
       if (&block == value)
          return writer.writeValue(tuple<llvm::Function*, size_t>(func, index));
       ++index;
    }
-   return tl::unexpected(tr(tc, "basic block not found in function"));
+   return error(tr(tc, "basic block not found in function"));
 }
 //---------------------------------------------------------------------------
 IOResult IO<llvm::Instruction*>::input(MetadataReader& reader, llvm::Instruction*& value) {
@@ -262,7 +268,7 @@ IOResult IO<llvm::Instruction*>::input(MetadataReader& reader, llvm::Instruction
    auto [bb, index] = instrMetadata;
 
    unsigned i = 0;
-   for (auto& instr : bb->getInstList()) {
+   for (auto& instr : *bb) {
       if (i == index) {
          value = &instr;
          return {};
@@ -270,41 +276,42 @@ IOResult IO<llvm::Instruction*>::input(MetadataReader& reader, llvm::Instruction
       ++i;
    }
 
-   return tl::unexpected(tr(tc, "instruction index out of range"));
+   return error(tr(tc, "instruction index out of range"));
 }
 //---------------------------------------------------------------------------
 IOResult IO<llvm::Instruction*>::output(MetadataWriter& writer, llvm::Instruction* value) {
    llvm::BasicBlock* bb = value->getParent();
    size_t index = 0;
-   for (auto& instr : bb->getInstList()) {
+   for (auto& instr : *bb) {
       if (&instr == value)
          return writer.writeValue(tuple<llvm::BasicBlock*, size_t>(bb, index));
       ++index;
    }
-   return tl::unexpected(tr(tc, "instruction not found in basic block"));
+   return error(tr(tc, "instruction not found in basic block"));
 }
 //---------------------------------------------------------------------------
 IOResult IO<llvm::Type*>::input(MetadataReader& reader, llvm::Type*& value) {
-   llvm::GlobalVariable* dummyVar;
-   if (auto result = reader.readValue(dummyVar); !result)
+   llvm::Function* dummyFunc;
+   if (auto result = reader.readValue(dummyFunc); !result)
       return result;
 
-   auto* dummyVarType = llvm::cast<llvm::PointerType>(dummyVar->getType())->getElementType();
-   value = llvm::cast<llvm::PointerType>(dummyVarType)->getElementType();
+   value = dummyFunc->getFunctionType()->getReturnType();
    return {};
 }
 //---------------------------------------------------------------------------
 IOResult IO<llvm::Type*>::output(MetadataWriter& writer, llvm::Type* value) {
-   auto* dummyVarType = value->getPointerTo();
-   auto* nullptrValue = llvm::ConstantPointerNull::get(dummyVarType);
-   auto* dummyVar = new llvm::GlobalVariable(writer.module, dummyVarType, true, llvm::GlobalValue::PrivateLinkage, nullptrValue, "metadata_type");
-   return writer.writeValue(dummyVar);
+   auto& context = writer.module.getContext();
+   auto* dummyFuncType = llvm::FunctionType::get(value, false);
+   auto* dummyFunc = llvm::Function::Create(dummyFuncType, llvm::Function::PrivateLinkage, "__metadataTypeDummyFunc", writer.module);
+   auto* bb = llvm::BasicBlock::Create(context, {}, dummyFunc);
+   new llvm::UnreachableInst(context, bb);
+   return writer.writeValue(dummyFunc);
 }
 //---------------------------------------------------------------------------
 IOResult StructMapperBase::handleMember(StructContext& context, void* value, IOResult (*input)(MetadataReader&, void*), IOResult (*output)(MetadataWriter&, const void*)) {
    if (context.isReading()) {
       if (context.members.empty())
-         return tl::unexpected(tr(tc, "unexpected end of struct members while reading member"));
+         return error(tr(tc, "unexpected end of struct members while reading member"));
       MetadataReader reader(*context.module);
       reader.current = context.members.back();
       auto result = input(reader, value);
@@ -331,7 +338,7 @@ IOResult StructMapperBase::handleInstruction(StructContext& context, void* value
       return result;
    if (context.isReading()) {
       if (!sameClass(instruction))
-         return tl::unexpected(tr(tc, "unexpected instruction type"));
+         return error(tr(tc, "unexpected instruction type"));
    }
    return {};
 }
@@ -350,7 +357,7 @@ IOResult StructMapperBase::inputStruct(MetadataReader& reader, void* value, IORe
       return result;
 
    if (!context.members.empty())
-      return tl::unexpected(tr(tc, "unexpected remaining members while reading struct"));
+      return error(tr(tc, "unexpected remaining members while reading struct"));
 
    return {};
 }

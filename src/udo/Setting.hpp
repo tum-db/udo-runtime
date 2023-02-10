@@ -3,6 +3,7 @@
 //---------------------------------------------------------------------------
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -47,11 +48,21 @@ class DefaultParserFunctions<unsigned> {
    static std::string output(const unsigned& v) noexcept;
 };
 template <>
+class DefaultParserFunctions<int> {
+   public:
+   static bool parse(int& v, std::string_view nv) noexcept;
+   static std::string parserDescription() noexcept;
+   static std::string output(const int& v) noexcept;
+};
+template <>
 class DefaultParserFunctions<uint64_t> {
    public:
    static bool parse(uint64_t& v, std::string_view nv) noexcept;
    static std::string parserDescription() noexcept;
    static std::string output(const uint64_t& v) noexcept;
+
+   /// Parse a byte specification with units. Default unit is MB
+   static bool parseWithUnits(uint64_t& v, std::string_view nv) noexcept;
 };
 template <>
 class DefaultParserFunctions<double> {
@@ -170,8 +181,11 @@ class SettingBase {
    /// The state
    std::atomic<char> state;
 
+   /// The error reporting stream
+   static std::ostream* errorOut;
+
    /// Constructor
-   SettingBase(std::string_view name, std::string_view description) noexcept;
+   SettingBase(std::string_view name, std::string_view desription) noexcept;
    /// Destructor
    ~SettingBase();
 
@@ -179,7 +193,7 @@ class SettingBase {
    void initializeImpl() noexcept;
    /// Make sure that the value is initialized
    void ensureInitialized() noexcept {
-      if (state.load() < Defined) initializeImpl();
+      if (state.load(std::memory_order_acquire) < Defined) initializeImpl();
    }
    /// Helper to set locked
    void setImpl(const void* nv, bool defined) noexcept;
@@ -201,6 +215,8 @@ class SettingBase {
    std::string_view getName() const noexcept { return name; }
    /// Get description
    std::string getDescription() const noexcept;
+   /// Format an error message for an unrecognized argument
+   std::string formatErrorMessage(std::string_view badArg);
    /// Get the readable value
    virtual std::string getOutput() noexcept = 0;
    /// Set from a string
@@ -212,6 +228,9 @@ class SettingBase {
    static std::vector<std::reference_wrapper<SettingBase>> getAllSettings() noexcept;
    /// Get a single setting
    static SettingBase* getSetting(std::string_view name) noexcept;
+
+   /// Set the error reporting stream
+   static void setErrorOut(std::ostream& e) { errorOut = &e; }
 };
 //---------------------------------------------------------------------------
 /// A system-wide setting. Usually used for debugging
@@ -223,8 +242,30 @@ class Setting : public SettingBase {
    /// An output function
    using Output = std::string (*)(const T&) noexcept;
 
+   /// Helper to temporarily set a setting
+   struct SetCurrent {
+      private:
+      /// The setting
+      Setting<T>* setting;
+      /// The old value
+      T old;
+
+      public:
+      /// Constructor
+      explicit SetCurrent(std::string_view name, const T& value) : setting(static_cast<Setting<T>*>(SettingBase::getSetting(name))) {
+         assert(setting);
+         old = setting->get();
+         setting->set(value);
+      }
+      /// Destructor
+      ~SetCurrent() { setting->set(old); }
+
+      SetCurrent(const SetCurrent&) = delete;
+      void operator=(const SetCurrent&) = delete;
+   };
+
    private:
-   /// The default value (as chosen by implementer)
+   /// The default value (for reset)
    T defaultValue;
    /// The value
    T value;

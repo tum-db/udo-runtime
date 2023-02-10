@@ -204,11 +204,11 @@ namespace impl {
 //---------------------------------------------------------------------------
 template <typename T>
 concept ContainerIOType = requires(const T& constRef, T& ref) {
-   typename T::value_type;
-   { constRef.begin() } -> std::input_iterator;
-   { constRef.end() } -> std::input_iterator;
-   ref.emplace_back();
-};
+                             typename T::value_type;
+                             { constRef.begin() } -> std::input_iterator;
+                             { constRef.end() } -> std::input_iterator;
+                             ref.emplace_back();
+                          };
 //---------------------------------------------------------------------------
 }
 //---------------------------------------------------------------------------

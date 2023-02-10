@@ -37,7 +37,7 @@ class ScopeGuard {
 //---------------------------------------------------------------------------
 /// Deduction guide for the forwarding constructor
 template <typename FunctionArg>
-ScopeGuard(FunctionArg&&) -> ScopeGuard<std::remove_reference_t<FunctionArg>>;
+ScopeGuard(FunctionArg &&) -> ScopeGuard<std::remove_reference_t<FunctionArg>>;
 //---------------------------------------------------------------------------
 }
 //---------------------------------------------------------------------------

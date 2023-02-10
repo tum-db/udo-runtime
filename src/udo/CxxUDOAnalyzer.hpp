@@ -43,6 +43,10 @@ struct CxxUDOAnalysis {
    CxxUDORuntimeFunctions runtimeFunctions;
    /// The string type
    llvm::Type* stringType;
+   /// The llvm type of ExecutionState
+   llvm::Type* executionState;
+   /// The getLocalState function of ExecutionState
+   llvm::Function* getLocalState;
    /// The output attributes
    llvm::SmallVector<CxxUDOOutput, 8> output;
    /// The global constructor (for static initialization)
@@ -53,8 +57,8 @@ struct CxxUDOAnalysis {
    llvm::Type* inputTupleType;
    /// The type of the output
    llvm::Type* outputTupleType;
-   /// The produceOutputTuple function
-   llvm::Function* produceOutputTuple;
+   /// The emit function
+   llvm::Function* emit;
    /// The size of the UDO
    size_t size;
    /// The alignment of the UDO
@@ -67,16 +71,16 @@ struct CxxUDOAnalysis {
    llvm::Function* constructor;
    /// The destructor of the UDO
    llvm::Function* destructor;
-   /// The consume function of the UDO
-   llvm::Function* consume;
+   /// The accept function of the UDO
+   llvm::Function* accept;
    /// The extraWork function of the UDO
    llvm::Function* extraWork;
-   /// The postProduce function of the UDO
-   llvm::Function* postProduce;
-   /// Is produceOutputTuple() called in consume()?
-   bool produceInConsume;
-   /// Is produceOutputTuple() called in postProduce()?
-   bool produceInPostProduce;
+   /// The process function of the UDO
+   llvm::Function* process;
+   /// Is emit() called in accept()?
+   bool emitInAccept;
+   /// Is emit() called in process()?
+   bool emitInProcess;
 };
 //---------------------------------------------------------------------------
 /// The analyzer for C++ UDOs
@@ -95,9 +99,9 @@ class CxxUDOAnalyzer {
    /// Constructor
    explicit CxxUDOAnalyzer(std::string funcSource, std::string udoClassName);
    /// Move constructor
-   CxxUDOAnalyzer(CxxUDOAnalyzer&& analyzer);
+   CxxUDOAnalyzer(CxxUDOAnalyzer&& analyzer) noexcept;
    /// Move assignment
-   CxxUDOAnalyzer& operator=(CxxUDOAnalyzer&& analyzer);
+   CxxUDOAnalyzer& operator=(CxxUDOAnalyzer&& analyzer) noexcept;
    /// Destructor
    ~CxxUDOAnalyzer();
 

@@ -14,7 +14,6 @@
 #include <clang/Frontend/Utils.h>
 #include <clang/Lex/HeaderSearchOptions.h>
 #include <llvm/IR/LegacyPassManager.h>
-#include <llvm/IR/Module.h>
 #include <llvm/Support/Host.h>
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Transforms/IPO/PassManagerBuilder.h>
@@ -60,7 +59,7 @@ void ClangCompiler::addFrontendAction(clang::FrontendAction* action)
    frontendActions.push_back(action);
 }
 //---------------------------------------------------------------------------
-static constexpr array cxxUDOBaseFlags = {"-xc++", "-std=c++20", "-nostdinc++", "-fPIC", "-ftls-model=initial-exec", "-march=native", "-fno-exceptions", "-Wall", "-Wextra"};
+static constexpr array cxxUDOBaseFlags = {"-xc++", "-std=c++20", "-nostdinc++", "-fPIC", "-ftls-model=initial-exec", "-march=native", "-fno-exceptions", "-Wall", "-Wextra", "-Wno-unqualified-std-cast-call"};
 //---------------------------------------------------------------------------
 static vector<const char*> getClangCmdline(unsigned optimizationLevel)
 // Get the command line to the clang invocation
@@ -96,7 +95,7 @@ tl::expected<void, string> ClangCompiler::compile()
 {
    LLVMCompiler::initializeLLVM();
 
-   auto invocation = clang::createInvocationFromCommandLine(getClangCmdline(optimizationLevel));
+   auto invocation = clang::createInvocation(getClangCmdline(optimizationLevel));
 
    auto& frontendOpts = invocation->getFrontendOpts();
    // createInvocationFromCommandLine sets DisableFree to true which then
@@ -222,10 +221,10 @@ ClangCompiler::CompilationWrapper::CompilationWrapper()
 }
 //---------------------------------------------------------------------------
 // Move constructor
-ClangCompiler::CompilationWrapper::CompilationWrapper(CompilationWrapper&& c) = default;
+ClangCompiler::CompilationWrapper::CompilationWrapper(CompilationWrapper&& c) noexcept = default;
 //---------------------------------------------------------------------------
 // Move assignment
-ClangCompiler::CompilationWrapper& ClangCompiler::CompilationWrapper::operator=(CompilationWrapper&& c) = default;
+ClangCompiler::CompilationWrapper& ClangCompiler::CompilationWrapper::operator=(CompilationWrapper&& c) noexcept = default;
 //---------------------------------------------------------------------------
 ClangCompiler::CompilationWrapper::~CompilationWrapper()
 // Destructor
@@ -241,7 +240,9 @@ ClangCompiler::CompilationWrapper ClangCompiler::createCompilation(unsigned opti
    // then using placement new
    auto* implStorage = ::operator new(sizeof(CompilationWrapper::Impl));
 #pragma GCC diagnostic push
+#ifndef __clang__
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
    ScopeGuard deallocateImpl([implStorage] { ::operator delete(implStorage); });
 #pragma GCC diagnostic pop
    auto* implPtr = static_cast<CompilationWrapper::Impl*>(implStorage);
@@ -252,7 +253,9 @@ ClangCompiler::CompilationWrapper ClangCompiler::createCompilation(unsigned opti
    // In case any of the following functions throw, the DiagnosticsEngine must
    // be destructed again
 #pragma GCC diagnostic push
+#ifndef __clang__
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
    ScopeGuard destructDiagnosticsEngine([implPtr] { implPtr->diagnosticsEngine.~DiagnosticsEngine(); });
 #pragma GCC diagnostic pop
 

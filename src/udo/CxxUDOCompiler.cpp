@@ -57,99 +57,6 @@ unsigned CxxUDOCompiler::getOptLevel()
    return cxxUDOOptLevel.get();
 }
 //---------------------------------------------------------------------------
-static void inlineConsume(llvm::CallBase* call)
-// Inline a function and mark the original as unreachable
-{
-   auto* func = call->getParent()->getParent();
-   auto* calleeFunc = call->getCalledFunction();
-   auto& context = func->getParent()->getContext();
-   llvm::InlineFunctionInfo inlineInfo;
-   llvm::InlineFunction(*call, inlineInfo);
-   calleeFunc->dropAllReferences();
-   auto* bb = llvm::BasicBlock::Create(context, "unreachable", calleeFunc);
-   llvm::IRBuilder<> builder(bb);
-   builder.CreateUnreachable();
-}
-//---------------------------------------------------------------------------
-static llvm::Function* wrapWithNewName(llvm::Function* func, string_view newName)
-// Create a wrapper function with external linkage with the new name that just
-// calls the given function. Returns nullptr if func is nullptr.
-{
-   if (!func)
-      return nullptr;
-
-   auto* module = func->getParent();
-   auto& context = module->getContext();
-   auto* funcType = func->getFunctionType();
-
-   auto* newFunc = llvm::Function::Create(funcType, llvm::GlobalValue::ExternalLinkage, asStringRef(newName), *module);
-   newFunc->setAttributes(func->getAttributes());
-
-   auto* bb = llvm::BasicBlock::Create(context, "init", newFunc);
-   llvm::IRBuilder<> builder(bb);
-
-   vector<llvm::Value*> args;
-   args.reserve(funcType->getNumParams());
-
-   for (auto& arg : newFunc->args())
-      args.push_back(&arg);
-
-   auto* call = builder.CreateCall(func, args);
-
-   if (funcType->getReturnType()->isVoidTy())
-      builder.CreateRetVoid();
-   else
-      builder.CreateRet(call);
-
-   return newFunc;
-}
-
-//---------------------------------------------------------------------------
-static llvm::Function* patchFunction(llvm::Function* func, string_view newName)
-// Patch the function so that it takes the global and local states as the
-// first two arguments
-{
-   auto& context = func->getContext();
-   auto* voidPtr = llvm::Type::getInt8PtrTy(context);
-   auto* funcType = func->getFunctionType();
-   vector<llvm::Type*> patchedFunctionParamTypes;
-   patchedFunctionParamTypes.reserve(funcType->getNumParams() + 2);
-   patchedFunctionParamTypes.push_back(voidPtr);
-   patchedFunctionParamTypes.push_back(voidPtr);
-   for (auto* paramType : funcType->params())
-      patchedFunctionParamTypes.push_back(paramType);
-   assert(!funcType->isVarArg());
-   auto* patchedFuncType = llvm::FunctionType::get(funcType->getReturnType(), patchedFunctionParamTypes, false);
-
-   auto* module = func->getParent();
-   llvm::Function* patchedFunc;
-
-   patchedFunc = llvm::Function::Create(patchedFuncType, func->getLinkage(), asStringRef(newName), module);
-
-   patchedFunc->setAttributes(func->getAttributes());
-   auto argIt = patchedFunc->arg_begin();
-   auto argEnd = patchedFunc->arg_end();
-   argIt->setName("globalState");
-   ++argIt;
-   argIt->setName("localState");
-   ++argIt;
-   auto* bb = llvm::BasicBlock::Create(context, "init", patchedFunc);
-   llvm::IRBuilder<> builder(bb);
-   vector<llvm::Value*> args;
-   args.reserve(argEnd - argIt);
-   for (; argIt != argEnd; ++argIt)
-      args.push_back(&*argIt);
-   auto* call = builder.CreateCall(funcType, func, args);
-   if (funcType->getReturnType()->isVoidTy())
-      builder.CreateRetVoid();
-   else
-      builder.CreateRet(call);
-
-   inlineConsume(call);
-
-   return patchedFunc;
-};
-//---------------------------------------------------------------------------
 static llvm::SmallVector<char, 0> compileModule(llvm::TargetMachine& targetMachine, llvm::Module& module)
 // Compile an llvm module to an object file
 {
@@ -180,10 +87,27 @@ tl::expected<CxxUDOLLVMFunctions, string> CxxUDOCompiler::preprocessModule()
 
    CxxUDOLLVMFunctions functions{};
    functions.udoFunctorType = llvm::StructType::create(context, {voidPtr, voidPtr}, functorTypeName);
-   functions.globalDestructor = wrapWithNewName(analysis.globalDestructor, globalDestructorName);
-   functions.constructor = wrapWithNewName(analysis.constructor, constructorName);
-   functions.destructor = wrapWithNewName(analysis.destructor, destructorName);
-   functions.extraWork = wrapWithNewName(analysis.extraWork, extraWorkName);
+   // functions.globalConstructor is called by the generated function below
+   functions.globalDestructor = analysis.globalDestructor;
+   functions.constructor = analysis.constructor;
+   functions.destructor = analysis.destructor;
+   functions.emit = analysis.emit;
+   functions.accept = analysis.accept;
+   functions.extraWork = analysis.extraWork;
+   functions.process = analysis.process;
+
+   // Overwrite the names of the functions so that we can find them again
+#define N(name)        \
+   if (functions.name) \
+      functions.name->setName(name##Name);
+   N(globalDestructor)
+   N(constructor)
+   N(destructor)
+   N(emit)
+   N(accept)
+   N(extraWork)
+   N(process)
+#undef N
 
    // Create a global constructor that takes a pointer to struct { int argc; char** argv; } as an argument.
    {
@@ -263,73 +187,57 @@ tl::expected<CxxUDOLLVMFunctions, string> CxxUDOCompiler::preprocessModule()
       functions.threadInit = threadInit;
    }
 
-   if (analysis.consume)
-      functions.consume = patchFunction(analysis.consume, consumeName);
-   if (analysis.postProduce)
-      functions.postProduce = patchFunction(analysis.postProduce, postProduceName);
-
-   // Patch the produceOutputTuple function
-   llvm::GlobalVariable* globalStateDummyValue;
-   llvm::GlobalVariable* localStateDummyValue;
+   // Create the emit function so that it calls the functor that contains the
+   // generated code for the parent operator
    {
-      // Make sure that the function is not duplicated or inlined
-      analysis.produceOutputTuple->addFnAttr(llvm::Attribute::NoDuplicate);
-      analysis.produceOutputTuple->addFnAttr(llvm::Attribute::NoInline);
+      // Make sure that the function is not duplicated or inlined because we
+      // want to do that manually in the CxxUDOLogic
+      analysis.emit->addFnAttr(llvm::Attribute::NoDuplicate);
+      analysis.emit->addFnAttr(llvm::Attribute::NoInline);
 
       // Create the global variable that holds the functor
-      auto* callbackPtrVar = new llvm::GlobalVariable(module, functions.udoFunctorType, false, llvm::GlobalVariable::ExternalLinkage, nullptr, asStringRef(produceOutputTupleFunctorName));
+      auto* callbackPtrVar = new llvm::GlobalVariable(module, functions.udoFunctorType, false, llvm::GlobalVariable::ExternalLinkage, nullptr, emitFunctorName);
 
-      auto* bb = llvm::BasicBlock::Create(context, "init", analysis.produceOutputTuple);
+      auto* bb = llvm::BasicBlock::Create(context, "init", analysis.emit);
       llvm::IRBuilder<> builder(bb);
-      globalStateDummyValue = new llvm::GlobalVariable(module, llvm::Type::getInt8Ty(context), false, llvm::GlobalVariable::PrivateLinkage, nullptr, "globalStateDummy");
-      localStateDummyValue = new llvm::GlobalVariable(module, llvm::Type::getInt8Ty(context), false, llvm::GlobalVariable::PrivateLinkage, nullptr, "localStateDummy");
+      builder.SetInsertPoint(bb);
 
       // Generate the code to call the functor
-      builder.SetInsertPoint(bb);
+      llvm::Value* executionState1;
+      llvm::Value* executionState2;
+      llvm::Value* tuple;
+      {
+         auto argIt = analysis.emit->arg_begin();
+         executionState1 = &*argIt;
+         ++argIt;
+         executionState2 = &*argIt;
+         ++argIt;
+         tuple = &*argIt;
+         ++argIt;
+         assert(argIt == analysis.emit->arg_end());
+      }
       auto* functorFuncPtr = builder.CreateConstGEP2_32(functions.udoFunctorType, callbackPtrVar, 0, 0);
-      auto* functorFuncVoidPtr = builder.CreateLoad(voidPtr, functorFuncPtr, "functorPtr");
+      auto* functorFunc = builder.CreateLoad(voidPtr, functorFuncPtr);
       auto* functorFuncType = llvm::FunctionType::get(llvm::Type::getVoidTy(context), {functions.udoFunctorType->getPointerTo(), voidPtr, voidPtr, voidPtr}, false);
-      auto* functorFunc = builder.CreateBitCast(functorFuncVoidPtr, functorFuncType->getPointerTo());
-      auto* tupleArg = builder.CreateBitCast(&*analysis.produceOutputTuple->arg_begin(), voidPtr);
-      builder.CreateCall(functorFuncType, functorFunc, {callbackPtrVar, globalStateDummyValue, localStateDummyValue, tupleArg});
+      builder.CreateCall(functorFuncType, functorFunc, {callbackPtrVar, executionState1, executionState2, tuple});
+
       builder.CreateRetVoid();
 
-      functions.produceOutputTupleFunctor = callbackPtrVar;
+      functions.emitFunctor = callbackPtrVar;
    }
 
-   {
-      auto* patchedFunc = patchFunction(analysis.produceOutputTuple, produceOutputTupleName);
-      auto argsIt = patchedFunc->arg_begin();
-      llvm::Value* globalState = &*argsIt;
-      ++argsIt;
-      llvm::Value* localState = &*argsIt;
-      globalStateDummyValue->replaceAllUsesWith(globalState);
-      localStateDummyValue->replaceAllUsesWith(localState);
-      globalStateDummyValue->eraseFromParent();
-      localStateDummyValue->eraseFromParent();
+   // Generate the getLocalState function
+   if (analysis.getLocalState && analysis.getLocalState->hasNUsesOrMore(1)) {
+      auto* bb = llvm::BasicBlock::Create(context, "init", analysis.getLocalState);
+      llvm::IRBuilder<> builder(bb);
+      auto* executionStateArg = &*analysis.getLocalState->arg_begin();
 
-      assert(analysis.produceOutputTuple->getNumUses() <= 1);
-      if (!analysis.produceOutputTuple->user_empty()) {
-         auto* call = llvm::cast<llvm::CallInst>(analysis.produceOutputTuple->user_back());
-         auto* func = call->getParent()->getParent();
-         vector<llvm::Value*> newCallArgs;
-         newCallArgs.reserve(call->arg_size() + 2);
-         auto argsIt = func->arg_begin();
-         llvm::Value* globalState = &*argsIt;
-         ++argsIt;
-         llvm::Value* localState = &*argsIt;
-         newCallArgs.push_back(globalState);
-         newCallArgs.push_back(localState);
-         for (auto& arg : call->args()) {
-            newCallArgs.push_back(arg.get());
-         }
-         auto* newCall = llvm::CallInst::Create(patchedFunc->getFunctionType(), patchedFunc, newCallArgs);
-         call->replaceAllUsesWith(newCall);
-         newCall->insertAfter(call);
-         call->eraseFromParent();
-      }
+      assert(analysis.executionState);
+      auto* i32Type = llvm::Type::getInt32Ty(context);
+      auto* localStatePtrPtr = builder.CreateInBoundsGEP(analysis.executionState, executionStateArg, {llvm::ConstantInt::get(i32Type, 0), llvm::ConstantInt::get(i32Type, 0), llvm::ConstantInt::get(i32Type, 0)});
+      auto* localStatePtr = builder.CreateLoad(voidPtr, localStatePtrPtr);
 
-      functions.produceOutputTuple = patchedFunc;
+      builder.CreateRet(localStatePtr);
    }
 
    // Generate the global variables for the functors to the runtime functions
@@ -422,11 +330,12 @@ tl::expected<vector<char>, string> CxxUDOCompiler::compile()
 {
    auto& module = analyzer.getModule();
 
-   auto targetMachinePtr = LLVMCompiler::setupBuilder(llvm::EngineBuilder{}, false).setRelocationModel(llvm::Reloc::PIC_).setCodeModel(llvm::CodeModel::Small).selectTarget();
+   llvm::EngineBuilder builder;
+   auto targetMachinePtr = LLVMCompiler::setupBuilder(builder, false).setRelocationModel(llvm::Reloc::PIC_).setCodeModel(llvm::CodeModel::Small).selectTarget();
    unique_ptr<remove_pointer_t<decltype(targetMachinePtr)>> targetMachine(targetMachinePtr);
 
    if (targetMachine->getTargetTriple().getArch() != llvm::Triple::x86_64)
-      return tl::unexpected(tr(tc, "C++ UDOs are only supported for x86_64"));
+      return tl::unexpected(string(tr(tc, "C++ UDOs are only supported for x86_64")));
 
    if (dumpCxxUDOObject) {
       error_code ec;
@@ -458,15 +367,15 @@ IOResult IO<CxxUDOLLVMFunctions>::enumEntries(StructContext& context, CxxUDOLLVM
    TRY(mapMember(context, value.globalConstructor));
    TRY(mapMember(context, value.globalDestructor));
    TRY(mapMember(context, value.threadInit));
-   TRY(mapMember(context, value.produceOutputTuple));
-   TRY(mapMember(context, value.produceOutputTupleFunctor));
+   TRY(mapMember(context, value.emit));
+   TRY(mapMember(context, value.emitFunctor));
    TRY(mapMember(context, value.printDebugFunctor));
    TRY(mapMember(context, value.getRandomFunctor));
    TRY(mapMember(context, value.constructor));
    TRY(mapMember(context, value.destructor));
-   TRY(mapMember(context, value.consume));
+   TRY(mapMember(context, value.accept));
    TRY(mapMember(context, value.extraWork));
-   TRY(mapMember(context, value.postProduce));
+   TRY(mapMember(context, value.process));
    return {};
 }
 //---------------------------------------------------------------------------

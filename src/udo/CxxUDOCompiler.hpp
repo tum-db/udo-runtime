@@ -21,8 +21,7 @@ namespace udo {
 class CxxUDOAnalyzer;
 //---------------------------------------------------------------------------
 /// The functions that are used for the UDO which are derived from the
-/// analysis. Some of them are wrappers that add the global/local state
-/// handling.
+/// analysis.
 struct CxxUDOLLVMFunctions {
    /// The type for a functor
    llvm::StructType* udoFunctorType;
@@ -32,10 +31,10 @@ struct CxxUDOLLVMFunctions {
    llvm::Function* globalDestructor;
    /// The thread initialization function
    llvm::Function* threadInit;
-   /// The produceOutputTuple function
-   llvm::Function* produceOutputTuple;
-   /// The global variable that contains the functor to the callback for produceOutputTuple
-   llvm::GlobalVariable* produceOutputTupleFunctor;
+   /// The emit function
+   llvm::Function* emit;
+   /// The global variable that contains the functor to the callback for emit
+   llvm::GlobalVariable* emitFunctor;
    /// The global variable that contains the functor to the printDebug function
    llvm::GlobalVariable* printDebugFunctor;
    /// The global variable that contains the functor to the getRandom function
@@ -44,12 +43,12 @@ struct CxxUDOLLVMFunctions {
    llvm::Function* constructor;
    /// The wrapper for the destructor
    llvm::Function* destructor;
-   /// The wrapper for consume
-   llvm::Function* consume;
+   /// The wrapper for accept
+   llvm::Function* accept;
    /// The extraWork function
    llvm::Function* extraWork;
-   /// The wrapper for postProduce
-   llvm::Function* postProduce;
+   /// The wrapper for process
+   llvm::Function* process;
 
    /// Call a function for every member pointer to the llvm functions
    template <typename F>
@@ -57,21 +56,21 @@ struct CxxUDOLLVMFunctions {
       mapFunc(&CxxUDOLLVMFunctions::globalConstructor);
       mapFunc(&CxxUDOLLVMFunctions::globalDestructor);
       mapFunc(&CxxUDOLLVMFunctions::threadInit);
-      mapFunc(&CxxUDOLLVMFunctions::produceOutputTuple);
+      mapFunc(&CxxUDOLLVMFunctions::emit);
       mapFunc(&CxxUDOLLVMFunctions::constructor);
       mapFunc(&CxxUDOLLVMFunctions::destructor);
-      mapFunc(&CxxUDOLLVMFunctions::consume);
+      mapFunc(&CxxUDOLLVMFunctions::accept);
       mapFunc(&CxxUDOLLVMFunctions::extraWork);
-      mapFunc(&CxxUDOLLVMFunctions::postProduce);
+      mapFunc(&CxxUDOLLVMFunctions::process);
       mapFunc(&CxxUDOLLVMFunctions::globalConstructor);
       mapFunc(&CxxUDOLLVMFunctions::globalDestructor);
       mapFunc(&CxxUDOLLVMFunctions::threadInit);
-      mapFunc(&CxxUDOLLVMFunctions::produceOutputTuple);
+      mapFunc(&CxxUDOLLVMFunctions::emit);
       mapFunc(&CxxUDOLLVMFunctions::constructor);
       mapFunc(&CxxUDOLLVMFunctions::destructor);
-      mapFunc(&CxxUDOLLVMFunctions::consume);
+      mapFunc(&CxxUDOLLVMFunctions::accept);
       mapFunc(&CxxUDOLLVMFunctions::extraWork);
-      mapFunc(&CxxUDOLLVMFunctions::postProduce);
+      mapFunc(&CxxUDOLLVMFunctions::process);
    }
 
    /// Call a function for every llvm functions
@@ -82,28 +81,28 @@ struct CxxUDOLLVMFunctions {
 
    /// Call a function for every global value
    template <typename F>
-   void mapGlobalValues(F mapFunc) {
-      mapFunc(globalConstructor);
-      mapFunc(globalDestructor);
-      mapFunc(threadInit);
-      mapFunc(produceOutputTuple);
-      mapFunc(constructor);
-      mapFunc(destructor);
-      mapFunc(consume);
-      mapFunc(extraWork);
-      mapFunc(postProduce);
-      mapFunc(globalConstructor);
-      mapFunc(globalDestructor);
-      mapFunc(threadInit);
-      mapFunc(produceOutputTuple);
-      mapFunc(produceOutputTupleFunctor);
-      mapFunc(printDebugFunctor);
-      mapFunc(getRandomFunctor);
-      mapFunc(constructor);
-      mapFunc(destructor);
-      mapFunc(consume);
-      mapFunc(extraWork);
-      mapFunc(postProduce);
+   void mapGlobalValues(F mapGlobal) {
+      mapGlobal(globalConstructor);
+      mapGlobal(globalDestructor);
+      mapGlobal(threadInit);
+      mapGlobal(emit);
+      mapGlobal(constructor);
+      mapGlobal(destructor);
+      mapGlobal(accept);
+      mapGlobal(extraWork);
+      mapGlobal(process);
+      mapGlobal(globalConstructor);
+      mapGlobal(globalDestructor);
+      mapGlobal(threadInit);
+      mapGlobal(emit);
+      mapGlobal(emitFunctor);
+      mapGlobal(printDebugFunctor);
+      mapGlobal(getRandomFunctor);
+      mapGlobal(constructor);
+      mapGlobal(destructor);
+      mapGlobal(accept);
+      mapGlobal(extraWork);
+      mapGlobal(process);
    }
 };
 //---------------------------------------------------------------------------
@@ -122,10 +121,10 @@ class CxxUDOCompiler {
    static constexpr std::string_view globalDestructorName = "udo.CxxUDO.GlobalDestructor";
    /// The name of the thread initialization function
    static constexpr std::string_view threadInitName = "udo.CxxUDO.ThreadInit";
-   /// The name of the generated produceOutputTuple function
-   static constexpr std::string_view produceOutputTupleName = "udo.CxxUDO.produceOutputTuple";
-   /// The name of the produceOutputTuple callback functor
-   static constexpr std::string_view produceOutputTupleFunctorName = "udo.CxxUDO.produceOutputTupleCallback";
+   /// The name of the generated emit function
+   static constexpr std::string_view emitName = "udo.CxxUDO.emit";
+   /// The name of the emit callback functor
+   static constexpr std::string_view emitFunctorName = "udo.CxxUDO.emitCallback";
    /// The name of the functor for printDebug
    static constexpr std::string_view printDebugFunctorName = "udo.CxxUDO.printDebug";
    /// The name of the functor for getRandom
@@ -134,12 +133,12 @@ class CxxUDOCompiler {
    static constexpr std::string_view constructorName = "udo.CxxUDO.Constructor";
    /// The name of the destructor of the UDO class
    static constexpr std::string_view destructorName = "udo.CxxUDO.Destructor";
-   /// The name of the consume function of the UDO class
-   static constexpr std::string_view consumeName = "udo.CxxUDO.consume";
+   /// The name of the accept function of the UDO class
+   static constexpr std::string_view acceptName = "udo.CxxUDO.accept";
    /// The name of the extraWork function of the UDO class
    static constexpr std::string_view extraWorkName = "udo.CxxUDO.extraWork";
-   /// The name of the postProduce function of the UDO class
-   static constexpr std::string_view postProduceName = "udo.CxxUDO.postProduce";
+   /// The name of the process function of the UDO class
+   static constexpr std::string_view processName = "udo.CxxUDO.process";
 
    private:
    /// The analyzer

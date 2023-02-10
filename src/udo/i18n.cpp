@@ -1,6 +1,7 @@
 #include "udo/i18n.hpp"
 #include <cstdio>
 #include <limits>
+#include <vector>
 //---------------------------------------------------------------------------
 // UDO runtime
 // (c) 2016 Thomas Neumann
@@ -9,7 +10,10 @@ using namespace std;
 //---------------------------------------------------------------------------
 namespace udo { namespace i18n {
 //---------------------------------------------------------------------------
-const char* translate(const char* /*context*/, const char* text)
+template <typename T, size_t size>
+using SmallVector = vector<T>;
+//---------------------------------------------------------------------------
+StringLiteral translate(string_view /*context*/, StringLiteral text)
 // The main translation logic
 {
    // A no-op for now, we can add that later.
@@ -21,6 +25,7 @@ void Format<const char*>::format(string& out, const char* /*format*/, unsigned /
 void Format<char*>::format(string& out, const char* /*format*/, unsigned /*formatLen*/, const void* value) { out += *(static_cast<const char* const*>(value)); }
 void Format<string>::format(string& out, const char* /*format*/, unsigned /*formatLen*/, const void* value) { out += *(static_cast<const string*>(value)); }
 void Format<string_view>::format(string& out, const char* /*format*/, unsigned /*formatLen*/, const void* value) { out += *(static_cast<const string_view*>(value)); }
+void Format<StringLiteral>::format(string& out, const char* /*format*/, unsigned /*formatLen*/, const void* value) { out += *(static_cast<const string_view*>(value)); }
 void Format<bool>::format(string& out, const char* /*format*/, unsigned /*formatLen*/, const void* value) {
    const char* s = (*(static_cast<const bool*>(value))) ? "true" : "false";
    out += s;
@@ -184,43 +189,43 @@ void Format<double>::format(string& out, const char* format, unsigned formatLen,
             case 'e': {
                if (!explicitPrecision)
                   precision = 6;
-               char buffer[precision + margin];
-               snprintf(buffer, precision + margin, "%.*e", precision, v);
+               SmallVector<char, 512> buffer(precision + margin);
+               snprintf(buffer.data(), precision + margin, "%.*e", precision, v);
                buffer[precision + margin - 1] = 0;
-               out += buffer;
+               out += buffer.data();
                return;
             }
             case 'F':
             case 'f': {
                if (!explicitPrecision)
                   precision = 6;
-               char buffer[precision + margin];
-               snprintf(buffer, precision + margin, "%.*f", precision, v);
+               SmallVector<char, 512> buffer(precision + margin);
+               snprintf(buffer.data(), precision + margin, "%.*f", precision, v);
                buffer[precision + margin - 1] = 0;
-               out += buffer;
+               out += buffer.data();
                return;
             }
             case 'N':
             case 'n': {
                if (!explicitPrecision)
                   precision = 6;
-               char buffer[precision + margin];
-               unsigned len = snprintf(buffer, precision + margin, "%.*f", precision, v);
+               SmallVector<char, 512> buffer(precision + margin);
+               unsigned len = snprintf(buffer.data(), precision + margin, "%.*f", precision, v);
                if (len >= precision + margin) len = precision + margin - 1;
                buffer[len] = 0;
                const char *firstDigit = nullptr, *dot = nullptr;
                for (unsigned index = 0; index != len; ++index) {
                   char c = buffer[index];
                   if (c == '.') {
-                     dot = buffer + index;
+                     dot = buffer.data() + index;
                      break;
                   }
-                  if ((!firstDigit) && ((c >= '0') && (c <= '9'))) firstDigit = buffer + index;
+                  if ((!firstDigit) && ((c >= '0') && (c <= '9'))) firstDigit = buffer.data() + index;
                }
                if (firstDigit && (!dot))
-                  dot = buffer + len;
+                  dot = buffer.data() + len;
                if (firstDigit && ((dot - firstDigit) > 3)) {
-                  for (const char* iter = buffer; iter != firstDigit; ++iter)
+                  for (const char* iter = buffer.data(); iter != firstDigit; ++iter)
                      out += *iter;
                   unsigned step = (((dot - firstDigit) - 1) % 3);
                   for (const char* iter = firstDigit; iter != dot;) {
@@ -233,7 +238,7 @@ void Format<double>::format(string& out, const char* format, unsigned formatLen,
                   }
                   out += dot;
                } else {
-                  out += buffer;
+                  out += buffer.data();
                }
                return;
             }
@@ -241,10 +246,10 @@ void Format<double>::format(string& out, const char* format, unsigned formatLen,
             case 'p': {
                if (!explicitPrecision)
                   precision = 6;
-               char buffer[precision + margin];
-               snprintf(buffer, precision + margin, "%.*f%%", precision, v * 100.0);
+               SmallVector<char, 512> buffer(precision + margin);
+               snprintf(buffer.data(), precision + margin, "%.*f%%", precision, v * 100.0);
                buffer[precision + margin - 1] = 0;
-               out += buffer;
+               out += buffer.data();
                return;
             }
             case 'R':
@@ -264,21 +269,18 @@ void Format<double>::format(string& out, const char* format, unsigned formatLen,
 
    if (!explicitPrecision)
       precision = 15;
-   char buffer[precision + margin];
-   snprintf(buffer, precision + margin, "%.*g", precision, v);
+   SmallVector<char, 512> buffer(precision + margin);
+   snprintf(buffer.data(), precision + margin, "%.*g", precision, v);
    buffer[precision + margin - 1] = 0;
-   out += buffer;
+   out += buffer.data();
 }
 //---------------------------------------------------------------------------
-string format(const char* text, const Arg* args, unsigned argCount)
+string format(StringLiteral text, const Arg* args, [[maybe_unused]] unsigned argCount)
 // Format a string
 {
    string result, part;
-   for (const char* iter = text;;) {
+   for (const char *iter = text.data(), *limit = text.data() + text.size(); iter != limit;) {
       char c = *iter;
-
-      // End of string?
-      if (!c) break;
 
       // Escaped opening bracket?
       if ((c == '{') && (iter[1] == '{')) {
@@ -314,7 +316,7 @@ string format(const char* text, const Arg* args, unsigned argCount)
             break;
       }
       unsigned id = 0;
-      bool idOk = parseUnsigned(start, iter, id);
+      [[maybe_unused]] bool idOk = parseUnsigned(start, iter, id);
 
       // Parse the width
       int width = 0;
@@ -360,6 +362,7 @@ string format(const char* text, const Arg* args, unsigned argCount)
       if (c != '}')
          break;
       ++iter;
+      assert(idOk && (id < argCount));
       if ((!idOk) || (id >= argCount))
          continue;
 

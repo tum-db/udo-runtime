@@ -31,8 +31,8 @@ typedef struct udo_functor {
 //---------------------------------------------------------------------------
 /// The functor addresses required for the precompiled C++ UDOs
 typedef struct udo_cxx_functors {
-   /// The functor for the produceOutputTuple callback
-   udo_functor produceOutputTupleFunctor;
+   /// The functor for the emit callback
+   udo_functor emitFunctor;
    /// The functor for printDebug
    udo_functor printDebugFunctor;
    /// The functor for getRandom
@@ -61,12 +61,12 @@ typedef struct udo_cxx_functions {
    void* constructor;
    /// The destructor function pointer
    void* destructor;
-   /// The consume function pointer
-   void* consume;
+   /// The accept function pointer
+   void* accept;
    /// The extraWork function pointer
    void* extraWork;
-   /// The postProduce function pointer
-   void* postProduce;
+   /// The process function pointer
+   void* process;
 } udo_cxx_functions;
 //---------------------------------------------------------------------------
 /// The arguments of a UDO

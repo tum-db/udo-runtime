@@ -184,6 +184,21 @@ class PrecompiledCxxUDOResolver : public llvm::JITSymbolResolver {
    bool allowsZeroSymbols() override { return true; }
 };
 //---------------------------------------------------------------------------
+namespace {
+//---------------------------------------------------------------------------
+extern "C" int udoDlFindObject(void* address, void* result)
+// This is a stub for the dl_find_object function from glibc. It writes
+// unwinding information for a given address to `result` and returns 0. On
+// error it returns -1. This is used by the gcc unwinder but it can handle the
+// case were this function returns -1, so we just do that.
+{
+   static_cast<void>(address);
+   static_cast<void>(result);
+   return -1;
+}
+//---------------------------------------------------------------------------
+}
+//---------------------------------------------------------------------------
 PrecompiledCxxUDOResolver::PrecompiledCxxUDOResolver(llvm::RuntimeDyld& linker, CxxUDOFunctors* functorStorage, CxxUDOAllocationFuncs allocationFuncs)
    : linker(linker)
 // Constructor
@@ -202,9 +217,13 @@ PrecompiledCxxUDOResolver::PrecompiledCxxUDOResolver(llvm::RuntimeDyld& linker, 
    predefinedSymbols.emplace("free", reinterpret_cast<void*>(allocationFuncs.free));
 
    // Register the functor symbols
-   predefinedSymbols.emplace(CxxUDOCompiler::produceOutputTupleFunctorName, &functorStorage->produceOutputTupleFunctor);
+   predefinedSymbols.emplace(CxxUDOCompiler::emitFunctorName, &functorStorage->emitFunctor);
    predefinedSymbols.emplace(CxxUDOCompiler::printDebugFunctorName, &functorStorage->printDebugFunctor);
    predefinedSymbols.emplace(CxxUDOCompiler::getRandomFunctorName, &functorStorage->getRandomFunctor);
+
+   // Define the dl_find_object symbol. See the udoDlFindObject function for
+   // more information.
+   predefinedSymbols.emplace("_dl_find_object", reinterpret_cast<void*>(&udoDlFindObject));
 }
 //---------------------------------------------------------------------------
 tl::expected<void, string> PrecompiledCxxUDOResolver::addLibrary(string_view path)
@@ -214,6 +233,9 @@ tl::expected<void, string> PrecompiledCxxUDOResolver::addLibrary(string_view pat
       // We assume that the libraries never change once loaded, so skip loading
       // it if it already exists.
       return {};
+
+   if (debugCxxUDO)
+      llvm::errs() << "opening static library " << asStringRef(path) << '\n';
 
    unique_ptr<llvm::MemoryBuffer> libBuffer;
    {
@@ -608,7 +630,7 @@ tl::expected<void, std::string> CxxUDOExecution::link(CxxUDOAllocationFuncs allo
    {
       auto result = llvm::object::ObjectFile::createObjectFile(objectFileBufferRef);
       if (!result)
-         return tl::unexpected(tr(tc, "invalid object file for C++ UDO"));
+         return tl::unexpected(string(tr(tc, "invalid object file for C++ UDO")));
       objectFile = move(*result);
    }
 
@@ -646,9 +668,9 @@ CxxUDOFunctions CxxUDOExecution::initialize()
    R(threadInit)
    R(constructor)
    R(destructor)
-   R(consume)
+   R(accept)
    R(extraWork)
-   R(postProduce)
+   R(process)
 #undef R
 
    return functions;

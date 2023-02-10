@@ -24,8 +24,8 @@ struct CxxUDOFunctor {
 //---------------------------------------------------------------------------
 /// The functor addresses required for the precompiled C++ UDOs
 struct CxxUDOFunctors {
-   /// The functor for the produceOutputTuple callback
-   CxxUDOFunctor<void(void*, void*)> produceOutputTupleFunctor;
+   /// The functor for the emit callback
+   CxxUDOFunctor<void(void*, void*)> emitFunctor;
    /// The functor for printDebug
    CxxUDOFunctor<void(void*, const char*, uint64_t)> printDebugFunctor;
    /// The functor for getRandom
@@ -61,11 +61,11 @@ struct CxxUDOFunctions {
    /// The destructor function pointer
    std::add_pointer_t<void(void*)> destructor;
    /// The consume function pointer
-   std::add_pointer_t<void(void*, void*, void*, void*, void*)> consume;
+   std::add_pointer_t<void(void*, void*, void*, void*)> accept;
    /// The extraWork function pointer
-   std::add_pointer_t<uint32_t(void*, void*, uint32_t)> extraWork;
-   /// The postProduce function pointer
-   std::add_pointer_t<uint8_t(void*, void*, void*, void*)> postProduce;
+   std::add_pointer_t<uint32_t(void*, void*, void*, uint32_t)> extraWork;
+   /// The process function pointer
+   std::add_pointer_t<uint8_t(void*, void*, void*)> process;
 };
 //---------------------------------------------------------------------------
 /// Link and execute a compiled C++ UDO

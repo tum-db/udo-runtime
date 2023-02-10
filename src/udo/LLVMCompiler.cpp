@@ -1,17 +1,24 @@
 #include "udo/LLVMCompiler.hpp"
+#include "udo/Setting.hpp"
+#include <llvm/Analysis/Lint.h>
 #include <llvm/ExecutionEngine/ExecutionEngine.h>
+#include <llvm/ExecutionEngine/JITEventListener.h>
 #include <llvm/ExecutionEngine/Orc/CompileUtils.h>
 #include <llvm/ExecutionEngine/SectionMemoryManager.h>
-#include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Verifier.h>
-#include <llvm/Support/DynamicLibrary.h>
+#include <llvm/IRReader/IRReader.h>
+#include <llvm/Passes/OptimizationLevel.h>
+#include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/Host.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/Transforms/InstCombine/InstCombine.h>
 #include <llvm/Transforms/Instrumentation/AddressSanitizer.h>
-#include <llvm/Transforms/Scalar.h>
+#include <llvm/Transforms/Scalar/ADCE.h>
+#include <llvm/Transforms/Scalar/EarlyCSE.h>
 #include <llvm/Transforms/Scalar/GVN.h>
+#include <llvm/Transforms/Scalar/Reassociate.h>
+#include <llvm/Transforms/Scalar/SimplifyCFG.h>
 #include <optional>
 #include <utility>
 //---------------------------------------------------------------------------
@@ -41,49 +48,75 @@ void LLVMCompiler::initializeLLVM()
    });
 }
 //---------------------------------------------------------------------------
-void LLVMCompiler::optimizeModule(llvm::Module* m, span<OptimizationPass> passes, atomic<bool>* cancellation, [[maybe_unused]] bool compileStatic)
+namespace {
+//---------------------------------------------------------------------------
+/// Our optimization levels
+enum class OptimizationLevel { Minimal,
+                               LLVMO1,
+                               LLVMO2,
+                               LLVMO3,
+                               LLVMOs,
+                               LLVMOz };
+//---------------------------------------------------------------------------
+}
+//---------------------------------------------------------------------------
+static Setting<OptimizationLevel> llvmoptimizer("llvmoptimizer", "LLVM Optimization level for JITBackend", OptimizationLevel::Minimal,
+                                                settinghelper::makeEnumParser(tuple{OptimizationLevel::Minimal, "Minimal optimizations", '0'},
+                                                                              tuple{OptimizationLevel::LLVMO1, "LLVM O1: Optimize quickly", '1'},
+                                                                              tuple{OptimizationLevel::LLVMO2, "LLVM O2: Fast execution", '2'},
+                                                                              tuple{OptimizationLevel::LLVMO3, "LLVM O3: Really fast execution", '3'},
+                                                                              tuple{OptimizationLevel::LLVMOs, "LLVM Os: Small code size and speed", 's'},
+                                                                              tuple{OptimizationLevel::LLVMOz, "LLVM Oz: Minimize only code size", 'z'}));
+//---------------------------------------------------------------------------
+void LLVMCompiler::optimizeModule(llvm::Module& m)
 // Optimize a module
 {
-   llvm::legacy::FunctionPassManager functionPassManager(m);
-   optional<llvm::legacy::PassManager> modulePassManager = nullopt;
+   // See: PassBuilderBindings.cpp:LLVMRunPasses()
+   auto passBuilder = llvm::PassBuilder();
+   llvm::LoopAnalysisManager loopAnalysisManager;
+   llvm::FunctionAnalysisManager functionAnalysisManager;
+   llvm::CGSCCAnalysisManager cgsccAnalysisManager;
+   llvm::ModuleAnalysisManager moduleAnalysisManager;
+   passBuilder.registerLoopAnalyses(loopAnalysisManager);
+   passBuilder.registerFunctionAnalyses(functionAnalysisManager);
+   passBuilder.registerCGSCCAnalyses(cgsccAnalysisManager);
+   passBuilder.registerModuleAnalyses(moduleAnalysisManager);
+   passBuilder.crossRegisterProxies(loopAnalysisManager, functionAnalysisManager, cgsccAnalysisManager, moduleAnalysisManager);
+   llvm::FunctionPassManager functionPassManager;
 
-#ifndef NDEBUG
-   functionPassManager.add(llvm::createVerifierPass());
-#endif
-   functionPassManager.add(llvm::createInstructionCombiningPass());
-   functionPassManager.add(llvm::createReassociatePass());
-   functionPassManager.add(llvm::createGVNPass());
-   functionPassManager.add(llvm::createCFGSimplificationPass());
-   functionPassManager.add(llvm::createAggressiveDCEPass());
-   functionPassManager.add(llvm::createCFGSimplificationPass());
+   auto optimizationLevel = llvmoptimizer.get();
+   if (optimizationLevel == OptimizationLevel::Minimal) {
+      // Stripped down O1 optimization pipeline
+      // See: PassBuilder::buildO1FunctionSimplificationPipeline()
+      functionPassManager.addPass(llvm::EarlyCSEPass(false));
+      functionPassManager.addPass(llvm::SimplifyCFGPass());
+      functionPassManager.addPass(llvm::InstCombinePass());
+      functionPassManager.addPass(llvm::ReassociatePass());
+      functionPassManager.addPass(llvm::GVNPass());
+      functionPassManager.addPass(llvm::SimplifyCFGPass());
+      functionPassManager.addPass(llvm::ADCEPass());
+      functionPassManager.addPass(llvm::SimplifyCFGPass());
 
-   // Sanitize functions if we have an asan build
-   // TODO: to fix this we would have to register @asan.module_ctor like clang does
-#if 0
-   if (CompilerToolchain::addressSanitizerActive) {
-      for (auto& f : *m)
-         if (!f.isDeclaration())
-            f.addFnAttr(llvm::Attribute::SanitizeAddress);
-      if (!compileStatic) {
-         modulePassManager.emplace();
-         // Run asan function pass on module, since that's what clang does
-         // Future versions of LLVM might again run this FunctionPass on the FunctionPassManager
-         modulePassManager->add(llvm::createAddressSanitizerFunctionPass());
-      }
+      llvm::ModulePassManager modulePassManager;
+      modulePassManager.addPass(llvm::createModuleToFunctionPassAdaptor(move(functionPassManager)));
+      modulePassManager.run(m, moduleAnalysisManager);
+
+      return;
    }
-#endif
 
-   functionPassManager.doInitialization();
-
-   for (auto& f : *m) {
-      if (cancellation && cancellation->load()) break;
-      functionPassManager.run(f);
+   // LLVM optimization settings
+   llvm::OptimizationLevel llvmOptLevel;
+   switch (optimizationLevel) {
+      case OptimizationLevel::Minimal: __builtin_unreachable(); break;
+      case OptimizationLevel::LLVMO1: llvmOptLevel = llvm::OptimizationLevel::O1; break;
+      case OptimizationLevel::LLVMO2: llvmOptLevel = llvm::OptimizationLevel::O2; break;
+      case OptimizationLevel::LLVMO3: llvmOptLevel = llvm::OptimizationLevel::O3; break;
+      case OptimizationLevel::LLVMOs: llvmOptLevel = llvm::OptimizationLevel::Os; break;
+      case OptimizationLevel::LLVMOz: llvmOptLevel = llvm::OptimizationLevel::Oz; break;
    }
-   if (modulePassManager)
-      modulePassManager->run(*m);
-
-   for (auto& pass : passes)
-      pass(*m);
+   auto modulePassManager = passBuilder.buildPerModuleDefaultPipeline(llvmOptLevel);
+   modulePassManager.addPass(llvm::createModuleToFunctionPassAdaptor(move(functionPassManager)));
+   modulePassManager.run(m, moduleAnalysisManager);
 }
 //---------------------------------------------------------------------------
 void LLVMCompiler::removeUnusedFunctions(llvm::Module& module)
@@ -96,7 +129,7 @@ void LLVMCompiler::removeUnusedFunctions(llvm::Module& module)
    dce.run(module, mam);
 }
 //---------------------------------------------------------------------------
-llvm::EngineBuilder&& LLVMCompiler::setupBuilder(llvm::EngineBuilder&& builder, bool cheapCompilation)
+llvm::EngineBuilder& LLVMCompiler::setupBuilder(llvm::EngineBuilder& builder, bool cheapCompilation)
 // Do the common setup for the EngineBuilder
 {
    // Tune down optimization level if needed
@@ -107,13 +140,12 @@ llvm::EngineBuilder&& LLVMCompiler::setupBuilder(llvm::EngineBuilder&& builder, 
    }
    builder.setTargetOptions(options);
    builder.setMCPU(cpuName);
-   builder.setEmulatedTLS(false);
 
-   // Set cpu instruction features to guarantee the safe usage of new & llvm unknown cpu names
 #ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wambiguous-reversed-operator"
 #endif
+   // Set cpu instruction features to guarantee the safe usage of new & llvm unknown cpu names
    if (auto features = llvm::StringMap<bool>{}; llvm::sys::getHostCPUFeatures(features)) {
       auto mattrs = llvm::SmallVector<llvm::StringRef, 32>{};
       for (auto& feature : features)
@@ -125,7 +157,7 @@ llvm::EngineBuilder&& LLVMCompiler::setupBuilder(llvm::EngineBuilder&& builder, 
 #pragma clang diagnostic pop
 #endif
 
-   return move(builder);
+   return builder;
 }
 //---------------------------------------------------------------------------
 namespace {
@@ -148,12 +180,13 @@ struct JITDefinitionGenerator : public llvm::orc::DefinitionGenerator {
       llvm::orc::SymbolNameSet added;
       llvm::orc::SymbolMap newSymbols;
 
-      // Look up all symbol
+      // Look up all symbols
       for (const auto& [name, flags] : names) {
          if (!(*name).empty()) {
             // Try to find the symbol
+            auto nameSv = string_view((*name).data(), (*name).size());
             void* addr = nullptr;
-            if (auto iter = compiler.functionSymbols.find((*name).str()); iter != compiler.functionSymbols.end())
+            if (auto iter = compiler.functionSymbols.find(string(nameSv)); iter != compiler.functionSymbols.end())
                addr = iter->second;
             if (!addr) {
                auto it = intrinsicSymbols.find(*name);
@@ -178,14 +211,14 @@ struct JITDefinitionGenerator : public llvm::orc::DefinitionGenerator {
 //---------------------------------------------------------------------------
 }
 //---------------------------------------------------------------------------
-LLVMCompiler::LLVMCompiler(unordered_map<string, void*> functionSymbols, unique_ptr<llvm::LLVMContext> context, unique_ptr<llvm::TargetMachine> targetMachine, vector<OptimizationPass> optimizationPasses, atomic<bool>* cancellation)
+LLVMCompiler::LLVMCompiler(FunctionSymbols functionSymbols, unique_ptr<llvm::LLVMContext> context, unique_ptr<llvm::TargetMachine> targetMachine)
    : functionSymbols(move(functionSymbols)), context(move(context)),
      targetMachine(move(targetMachine)),
-     optimizationPasses(move(optimizationPasses)),
      es(make_unique<llvm::orc::UnsupportedExecutorProcessControl>()),
      objectLayer(es, []() { return make_unique<llvm::SectionMemoryManager>(); }),
-     compileLayer(es, objectLayer, make_unique<llvm::orc::SimpleCompiler>(*this->targetMachine)),
-     optimizeLayer(es, compileLayer, [optimizationPasses = span(this->optimizationPasses), cancellation](llvm::orc::ThreadSafeModule m, const llvm::orc::MaterializationResponsibility&) { optimizeModule(m.getModuleUnlocked(),optimizationPasses,cancellation,false); return m; }),
+     objectTransformLayer(es, objectLayer),
+     compileLayer(es, objectTransformLayer, make_unique<llvm::orc::SimpleCompiler>(*this->targetMachine)),
+     optimizeLayer(es, compileLayer, [](llvm::orc::ThreadSafeModule m, const llvm::orc::MaterializationResponsibility&) { optimizeModule(*m.getModuleUnlocked()); return m; }),
      mainDylib(llvm::cantFail(es.createJITDylib("<main>")))
 // Constructor
 {
@@ -199,12 +232,13 @@ LLVMCompiler::~LLVMCompiler()
    llvm::cantFail(es.endSession());
 }
 //---------------------------------------------------------------------------
-LLVMCompiler LLVMCompiler::createForJITBackend(std::unordered_map<std::string, void*> functionSymbols, std::unique_ptr<llvm::LLVMContext> context, vector<OptimizationPass> optimizationPasses, bool cheapCompilation, std::atomic<bool>* cancellation)
+LLVMCompiler LLVMCompiler::createForJITBackend(FunctionSymbols functionSymbols, std::unique_ptr<llvm::LLVMContext> context, bool cheapCompilation)
 // Create the compiler for the JITBackend
 {
-   auto* targetMachinePtr = setupBuilder(llvm::EngineBuilder{}, cheapCompilation).selectTarget();
+   llvm::EngineBuilder builder;
+   auto* targetMachinePtr = setupBuilder(builder, cheapCompilation).selectTarget();
    unique_ptr<remove_pointer_t<decltype(targetMachinePtr)>> targetMachine(targetMachinePtr);
-   return LLVMCompiler(move(functionSymbols), move(context), move(targetMachine), move(optimizationPasses), cancellation);
+   return LLVMCompiler(move(functionSymbols), move(context), move(targetMachine));
 }
 //---------------------------------------------------------------------------
 void LLVMCompiler::compile(unique_ptr<llvm::Module> module)

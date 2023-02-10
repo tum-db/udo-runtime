@@ -83,6 +83,28 @@ string_view getName(const clang::NamedDecl* decl)
    return {};
 }
 //---------------------------------------------------------------------------
+bool hasNestedName(const clang::CXXRecordDecl* decl, span<const string_view> name)
+// Does the declaration have the given fully-qualified name?
+{
+   if (name.empty())
+      return false;
+   auto it = name.rbegin();
+   if (getName(decl) != *it)
+      return false;
+   ++it;
+   auto* ns = decl->getDeclContext();
+   auto end = name.rend();
+   for (; it != end && !ns->isTranslationUnit(); ++it) {
+      auto* namedDecl = llvm::dyn_cast<clang::NamedDecl>(ns);
+      if (!namedDecl)
+         return false;
+      if (getName(namedDecl) != *it)
+         return false;
+      ns = ns->getParent();
+   }
+   return it == end;
+}
+//---------------------------------------------------------------------------
 bool isInNamespace(const clang::Decl* decl, const clang::NamespaceDecl* ns)
 // Is the declaration in the given namespace?
 {
@@ -90,6 +112,44 @@ bool isInNamespace(const clang::Decl* decl, const clang::NamespaceDecl* ns)
    return parentNs->getCanonicalDecl() == ns->getCanonicalDecl();
 }
 //---------------------------------------------------------------------------
+bool isUIntType(const clang::ASTContext& context, clang::QualType type, unsigned numBits)
+// Is the type an unsigned integer type with the specified number of bits?
+{
+   // We don't care about qualifiers here, we don't differentiate between const
+   // uint32_t and uint32_t.
+   if (!type->isUnsignedIntegerType())
+      return false;
+
+   if (context.getTypeSize(type) != numBits)
+      return false;
+
+   return true;
+}
+//---------------------------------------------------------------------------
+bool isConstLvalueRefTo(clang::QualType refType, const clang::Type* expectedType)
+// Is `refType` a const lvalue reference to `expectedType`?
+{
+   auto* lvalueRefType = refType->getAs<clang::LValueReferenceType>();
+   if (!lvalueRefType)
+      return false;
+
+   auto pointeeType = lvalueRefType->getPointeeType();
+   if (!pointeeType.isConstQualified())
+      return false;
+
+   if (pointeeType.getCanonicalType().getTypePtr() != expectedType)
+      return false;
+
+   return true;
+}
+//---------------------------------------------------------------------------
+}
+//---------------------------------------------------------------------------
+template <typename T>
+string err(T msg)
+// Generate a RuntimeMessage with the given message
+{
+   return string(move(msg));
 }
 //---------------------------------------------------------------------------
 class CxxUDOClangConsumer : public clang::SemaConsumer {
@@ -116,32 +176,32 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
    clang::FunctionDecl* getRandom = nullptr;
    /// The String class
    clang::CXXRecordDecl* stringType = nullptr;
+   /// The ExecutionState class
+   clang::CXXRecordDecl* executionState = nullptr;
+   /// The getLocalState function of ExecutionState
+   clang::CXXMethodDecl* getLocalState = nullptr;
    /// The UDOperator (base) class template
-   clang::ClassTemplateDecl* udOperatorClass = nullptr;
-   /// The consume() function of the UDOperator template instantiation
-   clang::CXXMethodDecl* udOperatorConsume = nullptr;
-   /// The extraWork() function of the UDOperator template instantiation
-   clang::CXXMethodDecl* udOperatorExtraWork = nullptr;
-   /// The postProduce() function of the UDOperator template instantiation
-   clang::CXXMethodDecl* udOperatorPostProduce = nullptr;
-   /// The produceOutputTuple() function of the UDOperator template instantiation
-   clang::CXXMethodDecl* udOperatorProduceOutputTuple = nullptr;
-   /// The InputTuple class template argument for the subclass
-   clang::CXXRecordDecl* inputTupleClass = nullptr;
-   /// The OutputTuple class template argument for the subclass
-   clang::CXXRecordDecl* outputTupleClass = nullptr;
+   clang::CXXRecordDecl* udOperatorClass = nullptr;
+   /// The emit() function template declaration of the UDOperator class
+   clang::FunctionTemplateDecl* udOperatorEmit = nullptr;
    /// The subclass of UDOperator written by the user
    clang::CXXRecordDecl* udOperatorSubclass = nullptr;
+   /// The InputTuple member type of the UDO subclass
+   clang::CXXRecordDecl* inputTupleClass = nullptr;
+   /// The OutputTuple member type of the UDO subclass
+   clang::CXXRecordDecl* outputTupleClass = nullptr;
+   /// The emit() template specialization for the UDO subclass
+   clang::CXXMethodDecl* emit;
    /// The constructor of the subclass
    clang::CXXConstructorDecl* constructor = nullptr;
    /// The destructor of the subclass
    clang::CXXDestructorDecl* destructor = nullptr;
-   /// The consume function of the subclass
-   clang::CXXMethodDecl* consume = nullptr;
+   /// The accept function of the subclass
+   clang::CXXMethodDecl* accept = nullptr;
    /// The extraWork function of the subclass
    clang::CXXMethodDecl* extraWork = nullptr;
-   /// The postProduce function of the subclass
-   clang::CXXMethodDecl* postProduce = nullptr;
+   /// The process function of the subclass
+   clang::CXXMethodDecl* process = nullptr;
    /// The global constructor (for static initialization)
    llvm::Function* globalConstructor = nullptr;
    /// The global destructor (for static initialization)
@@ -160,7 +220,7 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
       }
       assert(compiler.hasDiagnostics() && compiler.hasInvocation());
       auto& invocation = compiler.getInvocation();
-      codegen = unique_ptr<clang::CodeGenerator>(clang::CreateLLVMCodeGen(compiler.getDiagnostics(), moduleName, invocation.getHeaderSearchOpts(), invocation.getPreprocessorOpts(), invocation.getCodeGenOpts(), context));
+      codegen = unique_ptr<clang::CodeGenerator>(clang::CreateLLVMCodeGen(compiler.getDiagnostics(), moduleName, nullptr, invocation.getHeaderSearchOpts(), invocation.getPreprocessorOpts(), invocation.getCodeGenOpts(), context));
    }
 
    /// Destructor
@@ -245,6 +305,20 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
       return nullptr;
    }
 
+   /// Get the ExecutionState type
+   llvm::Type* getExecutionState() {
+      if (executionState)
+         return getType(executionState);
+      return nullptr;
+   }
+
+   /// Get the ExecutionState::getLocalState() function
+   llvm::Function* getGetLocalState() {
+      if (getLocalState)
+         return getFunction(getLocalState);
+      return nullptr;
+   }
+
    /// Get the output attributes
    llvm::SmallVector<CxxUDOOutput, 8> getOutput() {
       llvm::SmallVector<CxxUDOOutput, 8> output;
@@ -269,10 +343,10 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
       return nullptr;
    }
 
-   /// Get the UDOperator::produceOutputTuple() function
-   llvm::Function* getProduceOutputTuple() {
-      if (udOperatorProduceOutputTuple)
-         return getFunction(udOperatorProduceOutputTuple);
+   /// Get the emit() function specialization called by the UDO subclass
+   llvm::Function* getEmit() {
+      if (udOperatorEmit)
+         return getFunction(emit);
       return nullptr;
    }
 
@@ -290,10 +364,10 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
       return nullptr;
    }
 
-   /// Get the consume function of the UDO subclass
-   llvm::Function* getConsume() {
-      if (consume)
-         return getFunction(consume);
+   /// Get the accept function of the UDO subclass
+   llvm::Function* getAccept() {
+      if (accept)
+         return getFunction(accept);
       return nullptr;
    }
 
@@ -304,10 +378,10 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
       return nullptr;
    }
 
-   /// Get the postProduce function of the UDO subclass
-   llvm::Function* getPostProduce() {
-      if (postProduce)
-         return getFunction(postProduce);
+   /// Get the process function of the UDO subclass
+   llvm::Function* getProcess() {
+      if (process)
+         return getFunction(process);
       return nullptr;
    }
 
@@ -411,16 +485,17 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
    }
 
    private:
-   /// Handle a declaration at a given nesting level
-   void handleDecl(clang::Decl* D, size_t level) {
+   /// Handle a declaration at a given nesting level. Define it with an
+   /// explicit requires clause so that it can't be called with any subclasses
+   /// of Decl (which is what the overloads of handleDecl should handle).
+   template <typename T>
+      requires std::is_same_v<T, clang::Decl>
+   void handleDecl(T* D, size_t level) {
       if (error)
          return;
       switch (D->getKind()) {
          case clang::Decl::Namespace:
             handleDecl(llvm::cast<clang::NamespaceDecl>(D), level);
-            break;
-         case clang::Decl::ClassTemplate:
-            handleDecl(llvm::cast<clang::ClassTemplateDecl>(D), level);
             break;
          case clang::Decl::CXXRecord:
             handleDecl(llvm::cast<clang::CXXRecordDecl>(D), level);
@@ -439,10 +514,7 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
          // don't traverse into std namespace
          return;
       }
-      if (
-         level == 0 &&
-         udoNamespace == nullptr &&
-         clang_utils::getName(decl) == "udo"sv) {
+      if (level == 0 && udoNamespace == nullptr && clang_utils::getName(decl) == "udo"sv) {
          udoNamespace = decl->getCanonicalDecl();
       }
       for (auto* subDecl : decl->decls()) {
@@ -452,41 +524,31 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
       }
    }
 
-   /// Handle a class template declaration at a given nesting level
-   void handleDecl(clang::ClassTemplateDecl* decl, size_t level) {
-      using namespace clang_utils;
-      if (level == 1 && udoNamespace && isInNamespace(decl, udoNamespace)) {
-         if (!udOperatorClass && getName(decl) == "UDOperator"sv) {
-            udOperatorClass = decl->getCanonicalDecl();
-            return;
-         }
-      }
-   }
-
    /// Handle a class declaration at a given nesting level
    void handleDecl(clang::CXXRecordDecl* decl, size_t level) {
       using namespace clang_utils;
-      auto hasNestedName = [](const clang::CXXRecordDecl* decl, span<const string_view> name) -> bool {
-         if (name.empty())
-            return false;
-         auto it = name.rbegin();
-         if (getName(decl) != *it)
-            return false;
-         ++it;
-         auto* ns = decl->getDeclContext();
-         auto end = name.rend();
-         for (; it != end && !ns->isTranslationUnit(); ++it) {
-            auto* namedDecl = llvm::dyn_cast<clang::NamedDecl>(ns);
-            if (!namedDecl)
-               return false;
-            if (getName(namedDecl) != *it)
-               return false;
-            ns = ns->getParent();
+      if (level == 1 && udoNamespace && isInNamespace(decl, udoNamespace)) {
+         if (!stringType && getName(decl) == "String"sv) {
+            stringType = decl;
+         } else if (!executionState && getName(decl) == "ExecutionState"sv) {
+            executionState = decl;
+            for (auto* func : decl->methods()) {
+               if (getName(func) == "getLocalState"sv)
+                  getLocalState = func;
+            }
+         } else if (!udOperatorClass && getName(decl) == "UDOperator"sv) {
+            udOperatorClass = llvm::cast<clang::CXXRecordDecl>(decl);
+            handleUDOperatorClass(udOperatorClass);
          }
-         return it == end;
-      };
+      }
       if (level == 1 && udoNamespace && !stringType && isInNamespace(decl, udoNamespace) && getName(decl) == "String"sv) {
          stringType = decl;
+      } else if (level == 1 && udoNamespace && !executionState && isInNamespace(decl, udoNamespace) && getName(decl) == "ExecutionState"sv) {
+         executionState = decl;
+         for (auto* func : decl->methods()) {
+            if (getName(func) == "getLocalState"sv)
+               getLocalState = func;
+         }
       } else if (level + 1 == udoName.size() && udOperatorClass && !udOperatorSubclass && hasNestedName(decl, udoName)) {
          handleUDOperatorSubclass(decl);
          return;
@@ -503,19 +565,20 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
 
    /// Handle a function declaration at a given nesting level
    void handleDecl(clang::FunctionDecl* decl, size_t level) {
-      if (level == 1 && !decl->isDefined()) {
+      using namespace clang_utils;
+      if (level == 1 && udoNamespace && isInNamespace(decl, udoNamespace) && !decl->isDefined()) {
          auto name = clang_utils::getName(decl);
          if (name == "printDebug"sv) {
             if (printDebug) {
                if (!error)
-                  error = tr(tc, "unexpected declaration of printDebug");
+                  error = err(tr(tc, "unexpected declaration of printDebug"));
             } else {
                printDebug = decl;
             }
          } else if (name == "getRandom"sv) {
             if (getRandom) {
                if (!error)
-                  error = tr(tc, "unexpected declaration of getRandom");
+                  error = err(tr(tc, "unexpected declaration of getRandom"));
             } else {
                getRandom = decl;
             }
@@ -524,17 +587,14 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
    }
 
    /// Handle the UDOperator base class
-   void handleUDOperatorClass(clang::CXXRecordDecl* decl) {
+   void handleUDOperatorClass(clang::CXXRecordDecl* classDecl) {
       using namespace clang_utils;
-      for (auto* func : decl->methods()) {
-         if (!udOperatorConsume && getName(func) == "consume"sv) {
-            udOperatorConsume = func;
-         } else if (!udOperatorExtraWork && getName(func) == "extraWork"sv) {
-            udOperatorExtraWork = func;
-         } else if (!udOperatorPostProduce && getName(func) == "postProduce"sv) {
-            udOperatorPostProduce = func;
-         } else if (!udOperatorProduceOutputTuple && getName(func) == "produceOutputTuple"sv) {
-            udOperatorProduceOutputTuple = func;
+      for (auto* decl : classDecl->decls()) {
+         auto* namedDecl = llvm::dyn_cast<clang::NamedDecl>(decl);
+         if (!namedDecl)
+            continue;
+         if (!udOperatorEmit && getName(namedDecl) == "emit"sv) {
+            udOperatorEmit = llvm::cast<clang::FunctionTemplateDecl>(namedDecl);
          }
       }
    }
@@ -568,24 +628,130 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
          decl->addAttr(clang::UsedAttr::CreateImplicit(*astContext, decl->getSourceRange().getBegin()));
    }
 
+   /// Check whether the given parameter type is a valid type for an execution
+   /// state argument
+   bool isValidExecutionStateParam(clang::QualType paramType) const {
+      // We don't care about the qualifiers here, the functions that take an
+      // execution state can take by const if they want.
+      if (paramType.getCanonicalType().getTypePtr() != executionState->getTypeForDecl())
+         return false;
+      return true;
+   }
+
+   /// Check the signature of the emit function:
+   /// static void emit(udo::ExecutionState, const OutputTuple&)
+   bool checkEmitSignature(clang::CXXMethodDecl* method) const {
+      using namespace clang_utils;
+      if (!method->isStatic())
+         return false;
+
+      auto* funcType = llvm::cast<clang::FunctionProtoType>(method->getFunctionType());
+      if (!funcType->getReturnType().getTypePtr()->isVoidType())
+         return false;
+
+      return true;
+
+      auto params = funcType->getParamTypes();
+      if (params.size() != 2)
+         return false;
+
+      if (!isValidExecutionStateParam(params[0]))
+         return false;
+      if (!isConstLvalueRefTo(params[1], outputTupleClass->getTypeForDecl()))
+         return false;
+
+      return true;
+   }
+
+   /// Check the signature of the accept function:
+   /// void accept(udo::ExecutionState, const InputTuple&)
+   bool checkAcceptSignature(clang::CXXMethodDecl* method) const {
+      using namespace clang_utils;
+
+      // The method must not be static, but we allow it to be const
+      if (method->isStatic())
+         return false;
+
+      auto* funcType = llvm::cast<clang::FunctionProtoType>(method->getFunctionType());
+      if (!funcType->getReturnType().getTypePtr()->isVoidType())
+         return false;
+
+      auto params = funcType->getParamTypes();
+      if (params.size() != 2)
+         return false;
+
+      if (!isValidExecutionStateParam(params[0]))
+         return false;
+      if (!isConstLvalueRefTo(params[1], inputTupleClass->getTypeForDecl()))
+         return false;
+
+      return true;
+   }
+
+   /// Check the signature of the extraWork function:
+   /// uint32_t extraWork(udo::ExecutionState, uint32_t)
+   bool checkExtraWorkSignature(clang::CXXMethodDecl* method) const {
+      using namespace clang_utils;
+
+      // The method must not be static, but we allow it to be const
+      if (method->isStatic())
+         return false;
+
+      auto* funcType = llvm::cast<clang::FunctionProtoType>(method->getFunctionType());
+      if (!isUIntType(*astContext, funcType->getReturnType(), 32))
+         return false;
+
+      auto params = funcType->getParamTypes();
+      if (params.size() != 2)
+         return false;
+
+      if (!isValidExecutionStateParam(params[0]))
+         return false;
+      if (!isUIntType(*astContext, params[1], 32))
+         return false;
+
+      return true;
+   }
+
+   /// Check the signature of the process function:
+   /// bool process(udo::ExecutionState)
+   bool checkProcessSignature(clang::CXXMethodDecl* method) const {
+      using namespace clang_utils;
+
+      // The method must not be static, but we allow it to be const
+      if (method->isStatic())
+         return false;
+
+      auto* funcType = llvm::cast<clang::FunctionProtoType>(method->getFunctionType());
+      if (!funcType->getReturnType()->isBooleanType())
+         return false;
+
+      auto params = funcType->getParamTypes();
+      if (params.size() != 1)
+         return false;
+
+      if (!isValidExecutionStateParam(params[0]))
+         return false;
+
+      return true;
+   }
+
    /// Handle a class that could potentially be a subclass of UDOperator
    void handleUDOperatorSubclass(clang::CXXRecordDecl* decl) {
       if (!decl->hasDefinition())
          return;
       if (decl->isPolymorphic()) {
-         error = tr(tc, "UDO class must not be polymorphic");
+         error = err(tr(tc, "UDO class must not be polymorphic"));
          return;
       }
 
       // Check if UDOperator is a (public, unambiguous, non-virtual) base of the class
       if (decl->getNumBases() == 0) {
-         error = tr(tc, "UDOperator must be a public, unambiguous, non-virtual base");
+         error = err(tr(tc, "UDOperator must be a public, unambiguous, non-virtual base"));
          return;
       }
 
       decl = decl->getCanonicalDecl();
-
-      clang::ClassTemplateSpecializationDecl* udOperatorBase = nullptr;
 
       auto traverseBases = [](clang::CXXRecordDecl* decl, auto& func) -> bool {
          queue<clang::CXXBaseSpecifier*> queue;
@@ -604,70 +770,116 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
          return true;
       };
 
+      bool foundBase = false;
       auto handleBase = [&](const clang::CXXBaseSpecifier* baseSpec) -> bool {
          if (baseSpec->isVirtual() || baseSpec->getAccessSpecifier() != clang::AS_public)
-            return true;
+            return false;
          auto* baseDecl = baseSpec->getType()->getAsCXXRecordDecl();
          if (!baseDecl)
-            return true;
-         auto* specialization = llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(baseDecl);
-         if (!specialization)
-            return true;
-         if (specialization->isExplicitSpecialization())
-            return true;
-         auto* templateDecl = specialization->getInstantiatedFrom().get<clang::ClassTemplateDecl*>();
-         if (templateDecl->getCanonicalDecl() != udOperatorClass)
-            return true;
-
-         if (udOperatorBase) {
-            error = tr(tc, "UDOperator must be unambiguous base class");
             return false;
+         if (baseDecl == udOperatorClass) {
+            if (foundBase) {
+               error = err(tr(tc, "UDOperator must be unambiguous base class"));
+               return false;
+            }
+            foundBase = true;
          }
-         udOperatorBase = specialization;
-
          return true;
       };
-      if (!traverseBases(decl, handleBase) || !udOperatorBase) {
+
+      if (!traverseBases(decl, handleBase) || !foundBase) {
          if (!error)
-            error = tr(tc, "UDOperator must be a public, unambiguous, non-virtual base");
+            error = err(tr(tc, "UDOperator must be a public, unambiguous, non-virtual base"));
          return;
       }
 
       udOperatorSubclass = decl;
-      handleUDOperatorClass(udOperatorBase);
 
-      // Get the input and output tuple types from the template arguments
-      auto& templateArgs = udOperatorBase->getTemplateArgs();
-      if (templateArgs.size() != 2) {
-         error = tr(tc, "Invalid UDOperator template instantiation");
-         return;
-      }
-      auto getTemplateArgClass = [](const clang::TemplateArgument& templateArg) -> clang::CXXRecordDecl* {
-         if (templateArg.getKind() != clang::TemplateArgument::Type)
+      // Get the input and output tuple types which should be type declarations in the derived class
+      auto findSubclassMemberType = [&](string_view name) -> clang::CXXRecordDecl* {
+         auto identIt = astContext->Idents.find(name);
+         if (identIt == astContext->Idents.end())
             return nullptr;
-         if (templateArg.isInstantiationDependent())
-            return nullptr; // unreachable: Only non-template class decls are considered as UDO subclasses
-         auto* decl = templateArg.getAsType()->getAsCXXRecordDecl();
-         if (!decl || !decl->isTriviallyCopyable())
+
+         auto* ident = identIt->second;
+         auto result = udOperatorSubclass->lookup(ident);
+         if (result.empty())
             return nullptr;
-         return decl;
+
+         auto* typeDecl = result.find_first<clang::TypeDecl>();
+         if (!typeDecl)
+            return nullptr;
+
+         auto declType = astContext->getCanonicalType(astContext->getTypeDeclType(typeDecl));
+         if (declType.hasQualifiers())
+            return nullptr;
+         if (auto recordType = declType.getAs<clang::RecordType>())
+            if (auto* cxxRecordDecl = llvm::dyn_cast<clang::CXXRecordDecl>(recordType->getDecl()))
+               return cxxRecordDecl;
+
+         return nullptr;
       };
-      inputTupleClass = getTemplateArgClass(templateArgs[0]);
-      if (!inputTupleClass) {
-         error = tr(tc, "unsupported type for InputTuple");
+
+      if (!(inputTupleClass = findSubclassMemberType("InputTuple"))) {
+         error = err(tr(tc, "invalid or missing member type \"InputTuple\" in UDO class"));
          return;
       }
-      outputTupleClass = getTemplateArgClass(templateArgs[1]);
-      if (!outputTupleClass) {
-         error = tr(tc, "unsupported type for OutputTuple");
+      if (!(outputTupleClass = findSubclassMemberType("OutputTuple"))) {
+         error = err(tr(tc, "invalid or missing member type \"OutputTuple\" in UDO class"));
          return;
+      }
+
+      // Find the specialization of the emit function for this class
+      {
+         void* dummy;
+         auto* specialization = udOperatorEmit->findSpecialization({clang::QualType(decl->getTypeForDecl(), 0)}, dummy);
+         if (!specialization) {
+            error = err(tr(tc, "UDO does not call emit() or does not use its class type as template argument"));
+            return;
+         }
+
+         auto* specializationInfo = specialization->getTemplateSpecializationInfo();
+         if (specializationInfo->isExplicitInstantiationOrSpecialization()) {
+            error = err(tr(tc, "emit() must not be instantiated or specialized explicitly"));
+            return;
+         }
+
+         auto* emitDecl = llvm::cast<clang::CXXMethodDecl>(specialization);
+
+         if (!checkEmitSignature(emitDecl)) {
+            error = err(tr(tc, "invalid signature of emit function"));
+            return;
+         }
+
+         emit = emitDecl;
       }
 
       for (auto method : decl->methods()) {
+         using namespace clang_utils;
          if (method->isUserProvided()) {
-            checkMethod(method);
-            if (error)
-               return;
+            auto methodName = getName(method);
+            if (methodName == "accept"sv) {
+               if (!checkAcceptSignature(method)) {
+                  error = err(tr(tc, "invalid signature of accept function, expected signature: void accept(udo::ExecutionState, const InputTuple&)"));
+                  return;
+               }
+               forceMemberFuncCodegen(method);
+               accept = method;
+            } else if (methodName == "extraWork"sv) {
+               if (!checkExtraWorkSignature(method)) {
+                  error = err(tr(tc, "invalid signature of extraWork function, expected signature: uint32_t extraWork(udo::ExecutionState, uint32_t)"));
+                  return;
+               }
+               forceMemberFuncCodegen(method);
+               extraWork = method;
+            } else if (methodName == "process"sv) {
+               if (!checkProcessSignature(method)) {
+                  error = err(tr(tc, "invalid signature of process function, expected signature: bool process(udo::ExecutionState)"));
+                  return;
+               }
+               forceMemberFuncCodegen(method);
+               process = method;
+            }
          }
       }
 
@@ -724,38 +936,6 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
       delayedInlineFunctions.clear();
    }
 
-   /// Check for the overridden methods of the UDOperator subclass
-   void checkMethod(clang::CXXMethodDecl* method) {
-      if (!method->getDeclName().isIdentifier())
-         return;
-      auto name = clang_utils::getName(method);
-      clang::CXXMethodDecl* parentMethod = nullptr;
-      clang::CXXMethodDecl** methodRef;
-      if (name == "consume"sv) {
-         parentMethod = udOperatorConsume;
-         methodRef = &consume;
-      } else if (name == "extraWork"sv) {
-         parentMethod = udOperatorExtraWork;
-         methodRef = &extraWork;
-      } else if (name == "postProduce"sv) {
-         parentMethod = udOperatorPostProduce;
-         methodRef = &postProduce;
-      } else {
-         return;
-      }
-      if (!parentMethod)
-         return;
-      auto parentType = astContext->getCanonicalType(parentMethod->getType());
-      auto methodType = astContext->getCanonicalType(method->getType());
-      if (parentType != methodType) {
-         error = tr(tc, "invalid function signature in C++-UDO method");
-         return;
-      }
-      *methodRef = method;
-      forceMemberFuncCodegen(method);
-      return;
-   }
-
    struct LLVMStructor {
       llvm::Function* func;
       unsigned priority;
@@ -801,7 +981,7 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
       // Create a function that calls the constructors in the order of their priority
       auto& context = module->getContext();
       auto* funcType = llvm::FunctionType::get(llvm::Type::getVoidTy(context), false);
-      auto* func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage, "udo.globalConstructor", *module);
+      auto* func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage, "umbra.udo.globalConstructor", *module);
       auto* bb = llvm::BasicBlock::Create(context, "init", func);
       llvm::IRBuilder<> builder(bb);
 
@@ -838,7 +1018,7 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
 
       // Create a function that calls the destructors and __cxa_finalize
       auto* funcType = llvm::FunctionType::get(llvm::Type::getVoidTy(context), false);
-      auto* func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage, "udo.globalDestructor", *module);
+      auto* func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage, "umbra.udo.globalDestructor", *module);
       auto* bb = llvm::BasicBlock::Create(context, "init", func);
       llvm::IRBuilder<> builder(bb);
 
@@ -905,12 +1085,14 @@ class CxxUDOFrontendAction : public clang::ASTFrontendAction {
       assert(astContext->getCharWidth() == CHAR_BIT);
       analysis.runtimeFunctions = consumer->getRuntimeFunctions();
       analysis.stringType = consumer->getStringType();
+      analysis.executionState = consumer->getExecutionState();
+      analysis.getLocalState = consumer->getGetLocalState();
       analysis.output = consumer->getOutput();
       analysis.globalConstructor = consumer->globalConstructor;
       analysis.globalDestructor = consumer->globalDestructor;
       analysis.inputTupleType = consumer->getInputTupleClassType();
       analysis.outputTupleType = consumer->getOutputTupleClassType();
-      analysis.produceOutputTuple = consumer->getProduceOutputTuple();
+      analysis.emit = consumer->getEmit();
       auto typeInfo = astContext->getTypeInfo(consumer->udOperatorSubclass->getTypeForDecl());
       analysis.size = typeInfo.Width / CHAR_BIT;
       analysis.alignment = typeInfo.Align / CHAR_BIT;
@@ -918,9 +1100,9 @@ class CxxUDOFrontendAction : public clang::ASTFrontendAction {
       analysis.llvmType = consumer->getUDOperatorSubclassType();
       analysis.constructor = consumer->getConstructor();
       analysis.destructor = consumer->getDestructor();
-      analysis.consume = consumer->getConsume();
+      analysis.accept = consumer->getAccept();
       analysis.extraWork = consumer->getExtraWork();
-      analysis.postProduce = consumer->getPostProduce();
+      analysis.process = consumer->getProcess();
       module = consumer->releaseModule();
    }
 };
@@ -946,17 +1128,17 @@ CxxUDOAnalyzer::CxxUDOAnalyzer(string funcSource, string udoClassName)
 }
 //---------------------------------------------------------------------------
 // Move constructor
-CxxUDOAnalyzer::CxxUDOAnalyzer(CxxUDOAnalyzer&& analyzer) = default;
+CxxUDOAnalyzer::CxxUDOAnalyzer(CxxUDOAnalyzer&& analyzer) noexcept = default;
 //---------------------------------------------------------------------------
 // Move assignment
-CxxUDOAnalyzer& CxxUDOAnalyzer::operator=(CxxUDOAnalyzer&& analyzer) = default;
+CxxUDOAnalyzer& CxxUDOAnalyzer::operator=(CxxUDOAnalyzer&& analyzer) noexcept = default;
 //---------------------------------------------------------------------------
 CxxUDOAnalyzer::~CxxUDOAnalyzer()
 // Destructor
 {
 }
 //---------------------------------------------------------------------------
-tl::expected<void, string> CxxUDOAnalyzer::analyze(llvm::LLVMContext* context, unsigned optimizationLevel)
+tl::expected<void, std::string> CxxUDOAnalyzer::analyze(llvm::LLVMContext* context, unsigned optimizationLevel)
 // Analyze the function
 {
    impl = make_unique<Impl>();
@@ -1045,23 +1227,25 @@ IOResult IO<CxxUDOOutput>::enumEntries(StructContext& context, CxxUDOOutput& val
 IOResult IO<CxxUDOAnalysis>::enumEntries(StructContext& context, CxxUDOAnalysis& value) {
    TRY(mapMember(context, value.runtimeFunctions));
    TRY(mapMember(context, value.stringType));
+   TRY(mapMember(context, value.executionState));
+   TRY(mapMember(context, value.getLocalState));
    TRY(mapMember(context, value.output));
    TRY(mapMember(context, value.globalConstructor));
    TRY(mapMember(context, value.globalDestructor));
    TRY(mapMember(context, value.inputTupleType));
    TRY(mapMember(context, value.outputTupleType));
-   TRY(mapMember(context, value.produceOutputTuple));
+   TRY(mapMember(context, value.emit));
    TRY(mapMember(context, value.size));
    TRY(mapMember(context, value.alignment));
    TRY(mapMember(context, value.name));
    TRY(mapMember(context, value.llvmType));
    TRY(mapMember(context, value.constructor));
    TRY(mapMember(context, value.destructor));
-   TRY(mapMember(context, value.consume));
+   TRY(mapMember(context, value.accept));
    TRY(mapMember(context, value.extraWork));
-   TRY(mapMember(context, value.postProduce));
-   TRY(mapMember(context, value.produceInConsume));
-   TRY(mapMember(context, value.produceInPostProduce));
+   TRY(mapMember(context, value.process));
+   TRY(mapMember(context, value.emitInAccept));
+   TRY(mapMember(context, value.emitInProcess));
    return {};
 }
 //---------------------------------------------------------------------------

@@ -198,7 +198,7 @@ udo_errno udo_get_arguments(udo_handle handle, udo_arguments* scalarArgs)
    }
 
    scalarArgs->numScalarArguments = impl->scalarArgTypesStorage.size();
-   scalarArgs->numTableArguments = analysis.consume ? 1 : 0;
+   scalarArgs->numTableArguments = analysis.accept ? 1 : 0;
    scalarArgs->pgTypeOids = impl->scalarArgTypesStorage.data();
 
    return UDO_SUCCESS;
