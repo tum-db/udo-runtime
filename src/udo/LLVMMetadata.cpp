@@ -119,7 +119,7 @@ static IOResult readIntMd(MetadataReader& reader, llvm::ConstantInt*& intMdOut, 
 }
 //---------------------------------------------------------------------------
 IOResult IO<intmax_t>::input(MetadataReader& reader, intmax_t& value, size_t bitSize) {
-   llvm::ConstantInt* intMd;
+   llvm::ConstantInt* intMd{};
    if (auto result = readIntMd(reader, intMd, bitSize); !result)
       return result;
    value = intMd->getSExtValue();
@@ -134,7 +134,7 @@ IOResult IO<intmax_t>::output(MetadataWriter& writer, intmax_t value, size_t bit
 }
 //---------------------------------------------------------------------------
 IOResult IO<uintmax_t>::input(MetadataReader& reader, uintmax_t& value, size_t bitSize) {
-   llvm::ConstantInt* intMd;
+   llvm::ConstantInt* intMd{};
    if (auto result = readIntMd(reader, intMd, bitSize); !result)
       return result;
    value = intMd->getZExtValue();
@@ -262,7 +262,7 @@ IOResult IO<llvm::BasicBlock*>::output(MetadataWriter& writer, llvm::BasicBlock*
 }
 //---------------------------------------------------------------------------
 IOResult IO<llvm::Instruction*>::input(MetadataReader& reader, llvm::Instruction*& value) {
-   tuple<llvm::BasicBlock*, size_t> instrMetadata;
+   tuple<llvm::BasicBlock*, size_t> instrMetadata{};
    if (auto result = reader.readValue(instrMetadata); !result)
       return result;
    auto [bb, index] = instrMetadata;
@@ -291,7 +291,7 @@ IOResult IO<llvm::Instruction*>::output(MetadataWriter& writer, llvm::Instructio
 }
 //---------------------------------------------------------------------------
 IOResult IO<llvm::Type*>::input(MetadataReader& reader, llvm::Type*& value) {
-   llvm::Function* dummyFunc;
+   llvm::Function* dummyFunc{};
    if (auto result = reader.readValue(dummyFunc); !result)
       return result;
 

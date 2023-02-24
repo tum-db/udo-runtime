@@ -13,10 +13,8 @@
 #include <clang/Frontend/TextDiagnosticBuffer.h>
 #include <clang/Frontend/Utils.h>
 #include <clang/Lex/HeaderSearchOptions.h>
-#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/Host.h>
-#include <llvm/Transforms/IPO.h>
-#include <llvm/Transforms/IPO/PassManagerBuilder.h>
 #include <new>
 //---------------------------------------------------------------------------
 // UDO runtime
@@ -187,24 +185,43 @@ void ClangCompiler::createVirtualFiles(clang::CompilerInstance& compiler)
 void ClangCompiler::optimizeModule(llvm::Module& module, unsigned optimizationLevel)
 // Run the optimizations on the module that clang would use
 {
-   llvm::PassManagerBuilder builder;
-   builder.OptLevel = optimizationLevel;
+   llvm::OptimizationLevel optLevel;
+   switch (optimizationLevel) {
+      case 0:
+         optLevel = llvm::OptimizationLevel::O0;
+         break;
+      case 1:
+         optLevel = llvm::OptimizationLevel::O1;
+         break;
+      case 2:
+         optLevel = llvm::OptimizationLevel::O2;
+         break;
+      case 3:
+      default:
+         optLevel = llvm::OptimizationLevel::O3;
+         break;
+   }
 
-   builder.Inliner = llvm::createFunctionInliningPass(builder.OptLevel, 0, false);
+   llvm::PassBuilder builder;
 
-   llvm::legacy::FunctionPassManager functionPassManager(&module);
-   llvm::legacy::PassManager modulePassManager;
+   llvm::LoopAnalysisManager lam;
+   llvm::FunctionAnalysisManager fam;
+   llvm::CGSCCAnalysisManager cgam;
+   llvm::ModuleAnalysisManager mam;
 
-   builder.populateFunctionPassManager(functionPassManager);
-   builder.populateModulePassManager(modulePassManager);
+   builder.registerModuleAnalyses(mam);
+   builder.registerCGSCCAnalyses(cgam);
+   builder.registerFunctionAnalyses(fam);
+   builder.registerLoopAnalyses(lam);
+   builder.crossRegisterProxies(lam, fam, cgam, mam);
 
-   functionPassManager.doInitialization();
-   for (auto& func : module)
-      if (!func.isDeclaration())
-         functionPassManager.run(func);
-   functionPassManager.doFinalization();
+   llvm::ModulePassManager pm;
+   if (optLevel == llvm::OptimizationLevel::O0)
+      pm = builder.buildO0DefaultPipeline(optLevel);
+   else
+      pm = builder.buildPerModuleDefaultPipeline(optLevel);
 
-   modulePassManager.run(module);
+   pm.run(module, mam);
 }
 //---------------------------------------------------------------------------
 /// The impl that contains the Driver
