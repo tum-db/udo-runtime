@@ -95,6 +95,9 @@ class ExecutionState {
    ExecutionState(const ExecutionState&) = default;
    ExecutionState& operator=(const ExecutionState&) = default;
 
+   /// Get the thread id of the current thread
+   uint32_t getThreadId();
+
    /// Get the local state for the thread of this execution state
    LocalState& getLocalState();
 };
@@ -103,6 +106,16 @@ class UDOperator {
    public:
    /// The value returned by extraWork() when all work is done
    static constexpr uint32_t extraWorkDone = -1;
+
+   /// Get the thread id from an execution state
+   static uint32_t getThreadId(ExecutionState executionState) {
+      return executionState.getThreadId();
+   }
+
+   /// Get the local state from an execution state
+   static LocalState& getLocalState(ExecutionState executionState) {
+      return executionState.getLocalState();
+   }
 
    /// Emit a tuple of the output
    template <typename Derived>

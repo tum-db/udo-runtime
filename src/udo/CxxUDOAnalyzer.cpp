@@ -178,6 +178,8 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
    clang::CXXRecordDecl* stringType = nullptr;
    /// The ExecutionState class
    clang::CXXRecordDecl* executionState = nullptr;
+   /// The getThreadId function of ExecutionState
+   clang::CXXMethodDecl* getThreadId = nullptr;
    /// The getLocalState function of ExecutionState
    clang::CXXMethodDecl* getLocalState = nullptr;
    /// The UDOperator (base) class template
@@ -309,6 +311,13 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
    llvm::Type* getExecutionState() {
       if (executionState)
          return getType(executionState);
+      return nullptr;
+   }
+
+   /// Get the ExecutionState::getThreadId() function
+   llvm::Function* getGetThreadId() {
+      if (getThreadId)
+         return getFunction(getThreadId);
       return nullptr;
    }
 
@@ -533,21 +542,15 @@ class CxxUDOClangConsumer : public clang::SemaConsumer {
          } else if (!executionState && getName(decl) == "ExecutionState"sv) {
             executionState = decl;
             for (auto* func : decl->methods()) {
-               if (getName(func) == "getLocalState"sv)
+               auto name = getName(func);
+               if (name == "getThreadId"sv)
+                  getThreadId = func;
+               else if (name == "getLocalState"sv)
                   getLocalState = func;
             }
          } else if (!udOperatorClass && getName(decl) == "UDOperator"sv) {
             udOperatorClass = llvm::cast<clang::CXXRecordDecl>(decl);
             handleUDOperatorClass(udOperatorClass);
-         }
-      }
-      if (level == 1 && udoNamespace && !stringType && isInNamespace(decl, udoNamespace) && getName(decl) == "String"sv) {
-         stringType = decl;
-      } else if (level == 1 && udoNamespace && !executionState && isInNamespace(decl, udoNamespace) && getName(decl) == "ExecutionState"sv) {
-         executionState = decl;
-         for (auto* func : decl->methods()) {
-            if (getName(func) == "getLocalState"sv)
-               getLocalState = func;
          }
       } else if (level + 1 == udoName.size() && udOperatorClass && !udOperatorSubclass && hasNestedName(decl, udoName)) {
          handleUDOperatorSubclass(decl);
@@ -1086,6 +1089,7 @@ class CxxUDOFrontendAction : public clang::ASTFrontendAction {
       analysis.runtimeFunctions = consumer->getRuntimeFunctions();
       analysis.stringType = consumer->getStringType();
       analysis.executionState = consumer->getExecutionState();
+      analysis.getThreadId = consumer->getGetThreadId();
       analysis.getLocalState = consumer->getGetLocalState();
       analysis.output = consumer->getOutput();
       analysis.globalConstructor = consumer->globalConstructor;
@@ -1228,6 +1232,7 @@ IOResult IO<CxxUDOAnalysis>::enumEntries(StructContext& context, CxxUDOAnalysis&
    TRY(mapMember(context, value.runtimeFunctions));
    TRY(mapMember(context, value.stringType));
    TRY(mapMember(context, value.executionState));
+   TRY(mapMember(context, value.getThreadId));
    TRY(mapMember(context, value.getLocalState));
    TRY(mapMember(context, value.output));
    TRY(mapMember(context, value.globalConstructor));

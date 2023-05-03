@@ -45,6 +45,8 @@ struct CxxUDOAnalysis {
    llvm::Type* stringType;
    /// The llvm type of ExecutionState
    llvm::Type* executionState;
+   /// The getThreadId function of ExecutionState
+   llvm::Function* getThreadId;
    /// The getLocalState function of ExecutionState
    llvm::Function* getLocalState;
    /// The output attributes

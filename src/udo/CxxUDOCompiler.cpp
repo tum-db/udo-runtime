@@ -226,6 +226,26 @@ tl::expected<CxxUDOLLVMFunctions, string> CxxUDOCompiler::preprocessModule()
       functions.emitFunctor = callbackPtrVar;
    }
 
+   // Generate the getThreadId function
+   if (analysis.getThreadId && analysis.getThreadId->hasNUsesOrMore(1)) {
+      // We need to call the getLocalState function in getThreadId
+      assert(analysis.getLocalState);
+
+      auto* bb = llvm::BasicBlock::Create(context, "init", analysis.getThreadId);
+      llvm::IRBuilder<> builder(bb);
+      auto* executionStateArg = &*analysis.getThreadId->arg_begin();
+
+      auto* localStatePtr = builder.CreateCall(analysis.getLocalState, {executionStateArg});
+      // The first 16 bytes of the local state are used by the UDO. The 32 bit
+      // thread id is stored behind these 16 bytes.
+      auto* threadIdPtr = builder.CreateConstGEP1_32(llvm::Type::getInt8Ty(context), localStatePtr, 16);
+      auto* threadId = builder.CreateLoad(llvm::Type::getInt32Ty(context), threadIdPtr);
+      builder.CreateRet(threadId);
+   } else {
+      analysis.getThreadId->eraseFromParent();
+      analysis.getThreadId = nullptr;
+   }
+
    // Generate the getLocalState function
    if (analysis.getLocalState && analysis.getLocalState->hasNUsesOrMore(1)) {
       auto* bb = llvm::BasicBlock::Create(context, "init", analysis.getLocalState);
@@ -238,6 +258,9 @@ tl::expected<CxxUDOLLVMFunctions, string> CxxUDOCompiler::preprocessModule()
       auto* localStatePtr = builder.CreateLoad(voidPtr, localStatePtrPtr);
 
       builder.CreateRet(localStatePtr);
+   } else {
+      analysis.getLocalState->eraseFromParent();
+      analysis.getLocalState = nullptr;
    }
 
    // Generate the global variables for the functors to the runtime functions
