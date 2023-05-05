@@ -41,14 +41,18 @@ ClangCompiler::ClangCompiler(string_view source, unsigned optimizationLevel)
    : optimizationLevel(optimizationLevel)
 // Constructor
 {
-   addVirtualFile("/tmp/udo-runtime/udo/UDOperator.hpp"sv, cxxUDOHeader);
-   addVirtualFile("/tmp/udo.cpp"sv, source);
+   for (auto header : cxxUDOHeaders) {
+      string filename = "/tmp/udo-runtime/udo/";
+      filename += header.filename;
+      addVirtualFile(move(filename), header.content);
+   }
+   addVirtualFile("/tmp/udo.cpp"s, source);
 }
 //---------------------------------------------------------------------------
-void ClangCompiler::addVirtualFile(string_view path, string_view source)
+void ClangCompiler::addVirtualFile(string path, string_view source)
 // Add a virtual file
 {
-   virtualFiles.push_back({path, source});
+   virtualFiles.push_back({move(path), source});
 }
 //---------------------------------------------------------------------------
 void ClangCompiler::addFrontendAction(clang::FrontendAction* action)

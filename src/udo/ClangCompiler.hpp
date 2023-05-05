@@ -28,7 +28,7 @@ class ClangCompiler {
    private:
    /// A virtual file
    struct VirtualFile {
-      std::string_view path;
+      std::string path;
       std::string_view source;
    };
 
@@ -47,7 +47,7 @@ class ClangCompiler {
    ClangCompiler(std::string_view source, unsigned optimizationLevel = 3);
 
    /// Add a virtual file
-   void addVirtualFile(std::string_view path, std::string_view source);
+   void addVirtualFile(std::string path, std::string_view source);
    /// Add a frontend action
    void addFrontendAction(clang::FrontendAction* action);
    /// Compile the file

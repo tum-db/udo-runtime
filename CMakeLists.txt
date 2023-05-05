@@ -48,7 +48,8 @@ endif()
 #---------------------------------------------------------------------------
 # Generate UDORuntime.cpp
 find_program(CXXUDO_DEFAULT_CLANGXX NAMES clang++-${LLVMVERSION} clang++ HINTS ${LLVM_TOOLS_BINARY_DIR} NO_DEFAULT_PATH)
-file(READ runtime/UDOperator.hpp CXXUDO_HEADER)
+file(READ runtime/ChunkedStorage.hpp CXXUDO_ChunkedStorage_hpp)
+file(READ runtime/UDOperator.hpp CXXUDO_UDOperator_hpp)
 configure_file(src/udo/UDORuntime.cpp.in ${CMAKE_CURRENT_BINARY_DIR}/src/udo/UDORuntime.cpp @ONLY)
 #---------------------------------------------------------------------------
 add_library(udoruntime STATIC
