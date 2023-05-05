@@ -99,11 +99,6 @@ typedef struct udo_attribute_descr_array {
    udo_attribute_descr* attributes;
 } udo_attribute_descr_array;
 //---------------------------------------------------------------------------
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wold-style-cast"
-PG_MODULE_MAGIC;
-#pragma GCC diagnostic pop
-//---------------------------------------------------------------------------
 struct udo_opaque_impl;
 //---------------------------------------------------------------------------
 /// An opage handle that is used to to track all objects create by this
