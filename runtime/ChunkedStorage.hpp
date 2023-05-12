@@ -211,6 +211,14 @@ class ChunkedStorage {
    /// Get the number of elements stored in this ChunkedStorage
    size_type size() const { return numElements; }
 
+   /// Is this storage empty?
+   bool empty() const { return size() == 0; }
+
+   /// Remove all elements
+   void clear() {
+      freeChunks();
+   }
+
    /// Emplace a value at the end
    template <typename... Args>
    T& emplace_back(Args&&... args) {
@@ -315,7 +323,88 @@ class ParallelChunkedStorage {
    };
 
    private:
-   using ChunkHeader = ChunkedStorage<T>::ChunkHeader;
+   using ChunkHeader = typename ChunkedStorage<T>::ChunkHeader;
+
+   /// The chunked storage for one thread
+   struct LocalChunkedStorageEntry {
+      /// The chunked storage
+      ChunkedStorage<T> storage;
+      /// The thread id given by a caller of `createLocalStorage`
+      uint32_t threadId;
+      /// The index of this entry. All indexes are unique but may not be
+      /// consistent with the order of the `next` pointers.
+      size_t index = -1;
+      /// The next entry
+      LocalChunkedStorageEntry* next = nullptr;
+   };
+
+
+   /// An iterator over all elements in a `ParallelChunkedStorage`
+   template <bool isConst>
+   class Iterator {
+      public:
+      using difference_type = std::ptrdiff_t;
+      using value_type = std::conditional_t<isConst, const T, T>;
+      using pointer = value_type*;
+      using reference = value_type&;
+      using iterator_category = std::forward_iterator_tag;
+
+      private:
+      friend class ParallelChunkedStorage;
+
+      using storage_iterator = std::conditional_t<isConst, typename ChunkedStorage<T>::const_iterator, typename ChunkedStorage<T>::iterator>;
+      using storage_type = std::conditional_t<isConst, const ChunkedStorage<T>, ChunkedStorage<T>>;
+
+      /// The current entry
+      LocalChunkedStorageEntry* currentEntry = nullptr;
+      /// The iterator of the current entry
+      storage_iterator it;
+
+      /// Make sure that the iterator points to a valid element or the end
+      void skipEmpty() {
+         while (currentEntry && it == currentEntry->storage.end()) {
+            currentEntry = currentEntry->next;
+            if (currentEntry)
+               it = static_cast<storage_type&>(currentEntry->storage).begin();
+            else
+               it = {};
+         }
+      }
+
+      /// Constructor
+      Iterator(LocalChunkedStorageEntry* entry, storage_iterator it) : currentEntry(entry), it(it) {
+         skipEmpty();
+      }
+
+      public:
+      /// Default constructor
+      Iterator() = default;
+
+      /// Dereference
+      reference operator*() const {
+         return *it;
+      }
+      /// Dereference
+      pointer operator->() const {
+         return it.operator->();
+      }
+
+      /// Pre-increment
+      Iterator& operator++() {
+         ++it;
+         skipEmpty();
+         return *this;
+      }
+      /// Post-increment
+      Iterator operator++(int) {
+         Iterator it(*this);
+         operator++();
+         return it;
+      }
+
+      /// Equality comparison
+      bool operator==(const Iterator& other) const = default;
+   };
 
    /// A parallel iterator over all chunks in a `ParallelChunkedStorage`
    template <bool isConst>
@@ -550,23 +639,12 @@ class ParallelChunkedStorage {
    };
 
    public:
+   using iterator = Iterator<false>;
+   using const_iterator = Iterator<true>;
    using parallel_iterator = ParallelIterator<false>;
    using const_parallel_iterator = ParallelIterator<true>;
 
    private:
-   /// The chunked storage for one thread
-   struct LocalChunkedStorageEntry {
-      /// The chunked storage
-      ChunkedStorage<T> storage;
-      /// The thread id given by a caller of `createLocalStorage`
-      uint32_t threadId;
-      /// The index of this entry. All indexes are unique but may not be
-      /// consistent with the order of the `next` pointers.
-      size_t index = -1;
-      /// The next entry
-      LocalChunkedStorageEntry* next = nullptr;
-   };
-
    /// The first entry in the list of chunked storages
    LocalChunkedStorageEntry* frontEntry = nullptr;
    /// The total number of entries
@@ -609,6 +687,15 @@ class ParallelChunkedStorage {
       numEntries = 0;
    }
 
+   /// The total number of elements. Note that this is not thread-safe and
+   /// linear in the number of threads.
+   size_t size() const {
+      size_t numElements = 0;
+      for (auto* entry = frontEntry; entry; entry = entry->next)
+         numElements += entry->storage.size();
+      return numElements;
+   }
+
    /// Create a new local chunked storage
    LocalChunkedStorageRef createLocalStorage(uint32_t threadId) {
       auto* entry = new LocalChunkedStorageEntry;
@@ -627,13 +714,37 @@ class ParallelChunkedStorage {
       return ref;
    }
 
+   /// Get an iterator to the first element
+   iterator begin() {
+      typename ChunkedStorage<T>::iterator it;
+      if (frontEntry)
+         it = std::begin(frontEntry->storage);
+      return iterator(frontEntry, it);
+   }
+   /// Get an iterator to the first element
+   const_iterator begin() const {
+      typename ChunkedStorage<T>::const_iterator it;
+      if (frontEntry)
+         it = std::cbegin(frontEntry->storage);
+      return const_iterator(frontEntry, it);
+   }
+
+   /// Get the end iterator
+   iterator end() {
+      return {};
+   }
+   /// Get the end iterator
+   const_iterator end() const {
+      return {};
+   }
+
    /// Get a parallel iterator
    parallel_iterator parallelIter() {
       return parallel_iterator(*this);
    }
    /// Get a parallel iterator
    const_parallel_iterator parallelIter() const {
-      return parallel_iterator(*this);
+      return const_parallel_iterator(*this);
    }
 };
 //---------------------------------------------------------------------------
