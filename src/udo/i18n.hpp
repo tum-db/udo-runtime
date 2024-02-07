@@ -2,6 +2,7 @@
 #define H_udo_i18n
 //---------------------------------------------------------------------------
 #include <concepts>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include "udo/StringLiteral.hpp"

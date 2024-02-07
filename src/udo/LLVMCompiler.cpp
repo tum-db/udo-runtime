@@ -197,7 +197,7 @@ struct JITDefinitionGenerator : public llvm::orc::DefinitionGenerator {
             // Register if found
             if (addr) {
                added.insert(name);
-               newSymbols[name] = llvm::JITEvaluatedSymbol(static_cast<llvm::JITTargetAddress>(reinterpret_cast<uintptr_t>(addr)), llvm::JITSymbolFlags::Exported);
+               newSymbols[name] = {llvm::orc::ExecutorAddr(reinterpret_cast<uintptr_t>(addr)), llvm::JITSymbolFlags::Exported};
             }
          }
       }
